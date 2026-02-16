@@ -6,6 +6,8 @@ from pathlib import Path
 from typing import Any
 from ai_ops.src.services.sheet_normalizer import SheetNormalizer
 from ai_ops.src.agents.executive_brief_agent import ExecutiveBriefAgent
+import json
+from datetime import date, datetime
 
 
 
@@ -154,6 +156,113 @@ def main() -> None:
                         print(f"- {p}")
                 else:
                     print("(no priorities)")
+
+                # Persist executive brief (JSON + Markdown)
+                try:
+                    out_dir = Path("data/output")
+                    out_dir.mkdir(parents=True, exist_ok=True)
+
+                    def _to_serializable(o):
+                        if isinstance(o, (date, datetime)):
+                            return o.isoformat()
+                        try:
+                            import numpy as _np
+                            if isinstance(o, (_np.integer, _np.floating)):
+                                return float(o)
+                        except Exception:
+                            pass
+                        return o
+
+                    brief_obj = {
+                        "as_of_date": nw.as_of_date.isoformat() if isinstance(nw.as_of_date, date) else str(nw.as_of_date),
+                        "kpi_movement_by_entity": brief.kpi_movement,
+                        "cash_alerts": brief.cash_alerts,
+                        "deals_requiring_attention": brief.deals_requiring_attention,
+                        "overdue_tasks_by_owner": brief.overdue_tasks_by_owner,
+                        "blocked_tasks_by_owner": brief.blocked_tasks_by_owner,
+                        "top_priorities": brief.top_priorities,
+                    }
+
+                    log.info("Writing executive brief to data/output/...")
+
+                    latest_path = out_dir / "brief_latest.json"
+                    dated_name = f"brief_{brief_obj['as_of_date']}.json"
+                    dated_path = out_dir / dated_name
+
+                    with open(latest_path, "w", encoding="utf-8") as f:
+                        json.dump(brief_obj, f, indent=2, ensure_ascii=False, default=_to_serializable)
+                    with open(dated_path, "w", encoding="utf-8") as f:
+                        json.dump(brief_obj, f, indent=2, ensure_ascii=False, default=_to_serializable)
+
+                    # Build markdown
+                    md_lines = []
+                    md_lines.append(f"Executive Brief — {brief_obj['as_of_date']}")
+                    md_lines.append("")
+                    md_lines.append("## KPI Movement")
+
+                    kpi = brief.kpi_movement if brief.kpi_movement else {}
+                    if not kpi:
+                        md_lines.append("None")
+                    else:
+                        for ent, val in kpi.items():
+                            if isinstance(val, str):
+                                md_lines.append(f"- {ent}: {val}")
+                                continue
+                            md_lines.append(f"- {ent}:")
+                            for field, metric in val.items():
+                                if metric is None:
+                                    md_lines.append(f"  - {field}: None")
+                                    continue
+                                prior = metric.get("prior")
+                                latest = metric.get("latest")
+                                delta = metric.get("delta")
+                                def _fmt(n):
+                                    try:
+                                        return f"{n:,.0f}"
+                                    except Exception:
+                                        return str(n)
+                                sign = "+" if (isinstance(delta, (int, float)) and delta > 0) else ""
+                                md_lines.append(f"  - {field}: { _fmt(prior) } -> { _fmt(latest) } (delta {sign}{ _fmt(delta) })")
+
+                    md_lines.append("")
+                    md_lines.append("## Cash Alerts")
+                    if brief.cash_alerts:
+                        for a in brief.cash_alerts:
+                            md_lines.append(f"- {a}")
+                    else:
+                        md_lines.append("None")
+
+                    md_lines.append("")
+                    md_lines.append("## Deals Requiring Attention")
+                    if brief.deals_requiring_attention:
+                        for d in brief.deals_requiring_attention:
+                            md_lines.append(f"- {d}")
+                    else:
+                        md_lines.append("None")
+
+                    md_lines.append("")
+                    md_lines.append("## Blocked Tasks")
+                    if brief.blocked_tasks_by_owner:
+                        for owner, tasks_list in brief.blocked_tasks_by_owner.items():
+                            md_lines.append(f"- {owner}: {', '.join(tasks_list)}")
+                    else:
+                        md_lines.append("None")
+
+                    md_lines.append("")
+                    md_lines.append("## Top Priorities")
+                    if brief.top_priorities:
+                        for i, item in enumerate(brief.top_priorities, start=1):
+                            md_lines.append(f"{i}. {item}")
+                    else:
+                        md_lines.append("None")
+
+                    md_path = out_dir / f"executive_brief_{brief_obj['as_of_date']}.md"
+                    with open(md_path, "w", encoding="utf-8") as f:
+                        f.write("\n".join(md_lines))
+
+                    log.info("Executive brief written successfully")
+                except Exception as e:
+                    log.exception("Failed to write executive brief: %s", e)
 
             except Exception as e:
                 print(f"Executive brief error: {e}")

@@ -46,27 +46,74 @@ class ExecutiveBriefAgent:
         )
 
     def _compute_kpi_movement(self, kpi: pd.DataFrame) -> Dict[str, Any]:
+        # Compute per-entity KPI movement. Expect normalized columns including 'date' and 'entity'.
         if kpi is None or kpi.empty or "date" not in kpi.columns:
             return {}
+
         df = kpi.copy()
-        df = df.sort_values("date")
-        if len(df) < 2:
+        # Ensure date column is parsed to date objects
+        try:
+            df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.date
+        except Exception:
+            pass
+
+        # Required entity column
+        if "entity" not in df.columns:
             return {}
-        last = df.iloc[-1]
-        prev = df.iloc[-2]
-        movement = {}
-        for col in df.columns:
-            if col == "date":
-                continue
+
+        movement: Dict[str, Any] = {}
+
+        # KPI fields to compute deltas for (normalized names)
+        kpi_fields = [
+            "revenue",
+            "cash",
+            "pipeline_value",
+            "closings_count",
+            "orders_count",
+            "occupancy",
+        ]
+
+        # Helper to compute numeric delta
+        def _numeric_delta(latest_val, prior_val):
             try:
-                latest = pd.to_numeric(last[col], errors="coerce")
-                prior = pd.to_numeric(prev[col], errors="coerce")
+                latest = pd.to_numeric(latest_val, errors="coerce")
+                prior = pd.to_numeric(prior_val, errors="coerce")
                 if pd.isna(latest) or pd.isna(prior):
-                    movement[col] = None
-                else:
-                    movement[col] = {"prior": float(prior), "latest": float(latest), "delta": float(latest - prior)}
+                    return None
+                return {"prior": float(prior), "latest": float(latest), "delta": float(latest - prior)}
             except Exception:
-                movement[col] = None
+                return None
+
+        # Group by entity and compute movement per entity
+        for entity, g in df.groupby("entity"):
+            try:
+                group = g.sort_values("date")
+            except Exception:
+                group = g
+            # drop rows missing date for ordering
+            group = group.dropna(subset=["date"]) if "date" in group.columns else group
+            if group.shape[0] < 2:
+                movement[str(entity)] = "(no prior snapshot)"
+                continue
+
+            latest = group.iloc[-1]
+            # find previous by date: last row with date < latest.date
+            prev_candidates = group[group["date"] < latest["date"]]
+            if prev_candidates.empty:
+                # if no earlier date, try the previous row regardless
+                prev = group.iloc[-2]
+            else:
+                prev = prev_candidates.iloc[-1]
+
+            ent_movement: Dict[str, Any] = {}
+            for field in kpi_fields:
+                if field in group.columns:
+                    ent_movement[field] = _numeric_delta(latest.get(field), prev.get(field))
+                else:
+                    ent_movement[field] = None
+
+            movement[str(entity)] = ent_movement
+
         return movement
 
     def _compute_cash_alerts(self, kpi: pd.DataFrame, deals: pd.DataFrame, as_of: date) -> List[str]:

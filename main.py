@@ -6,13 +6,24 @@ from pathlib import Path
 from typing import Any
 from ai_ops.src.services.sheet_normalizer import SheetNormalizer
 from ai_ops.src.agents.executive_brief_agent import ExecutiveBriefAgent
+from ai_ops.src.services.narrative_composer import compose_narrative
+from ai_ops.src.core.run_report import RunReport, InputsUsed
+from ai_ops.src.services.run_report_renderer import render_run_report_md
+from ai_ops.src.services.operator_brief_generator import generate_operator_brief_markdown
 import json
 from datetime import date, datetime
+import uuid
+import time
 
 
 
 
 def main() -> None:
+    # Capture run timing
+    run_start_time = time.time()
+    started_at_iso = datetime.now().isoformat()
+    run_id = datetime.now().strftime("%Y%m%d%H%M%S")  # Use timestamp-based run_id
+    
     log = get_logger()
     log.info("Starting AI-Ops skeleton application")
     log.debug(f"Loaded settings: {settings}")
@@ -59,7 +70,7 @@ def main() -> None:
             except Exception:
                 print("(preview unavailable)")
 
-        # Normalize sheets and print derived counts
+            # Normalize sheets and print derived counts
         try:
             normalizer = SheetNormalizer()
             nw = normalizer.normalize(sheets)
@@ -69,6 +80,17 @@ def main() -> None:
 
             deals = nw.deals
             tasks = nw.tasks
+
+            # Capture inputs used for RunReport
+            sheet_names = list(sheets.keys())
+            row_counts = {}
+            for name, df in sheets.items():
+                if hasattr(df, "shape"):
+                    row_counts[name] = df.shape[0]
+                elif hasattr(df, "_rows"):
+                    row_counts[name] = len(df._rows)
+                else:
+                    row_counts[name] = 0
 
             # Deals summary
             total_deals = len(deals) if deals is not None else 0
@@ -162,6 +184,12 @@ def main() -> None:
                     out_dir = Path("data/output")
                     out_dir.mkdir(parents=True, exist_ok=True)
 
+                    # Create a per-run output directory so each run's artifacts
+                    # are grouped. Keep latest pointers at data/output/ for
+                    # convenience.
+                    run_dir = out_dir / f"run_{run_id}"
+                    run_dir.mkdir(parents=True, exist_ok=True)
+
                     def _to_serializable(o):
                         if isinstance(o, (date, datetime)):
                             return o.isoformat()
@@ -187,7 +215,7 @@ def main() -> None:
 
                     latest_path = out_dir / "brief_latest.json"
                     dated_name = f"brief_{brief_obj['as_of_date']}.json"
-                    dated_path = out_dir / dated_name
+                    dated_path = run_dir / dated_name
 
                     with open(latest_path, "w", encoding="utf-8") as f:
                         json.dump(brief_obj, f, indent=2, ensure_ascii=False, default=_to_serializable)
@@ -256,11 +284,116 @@ def main() -> None:
                     else:
                         md_lines.append("None")
 
-                    md_path = out_dir / f"executive_brief_{brief_obj['as_of_date']}.md"
-                    with open(md_path, "w", encoding="utf-8") as f:
-                        f.write("\n".join(md_lines))
+                    # Compose LLM narrative (if enabled) and append to markdown
+                    # compose_narrative now returns (narrative_text, error_str)
+                    llm_error = None
+                    narrative_text, narrative_err = compose_narrative(brief_obj)
+                    if narrative_err:
+                        # Record the first LLM-related error and avoid further LLM calls
+                        llm_error = str(narrative_err)
+                    if narrative_text:
+                        md_lines.append("")
+                        md_lines.append("## Narrative (LLM)")
+                        md_lines.append(narrative_text)
+
+                    # BUILD RUNREPORT EARLY so we can generate deterministic brief
+                    run_end_time = time.time()
+                    finished_at_iso = datetime.now().isoformat()
+                    duration_ms = int((run_end_time - run_start_time) * 1000)
+
+                    # Build summary counts
+                    summary_counts = {
+                        "deals_total": total_deals,
+                        "deals_dd_overdue": dd_overdue,
+                        "deals_dd_due_soon": dd_due_soon,
+                        "deals_stalled_ge_14": stalled_ge_14,
+                        "tasks_total": total_tasks,
+                        "tasks_overdue": overdue_tasks,
+                        "tasks_blocked": blocked_tasks,
+                    }
+
+                    # Construct inputs_used
+                    inputs_used = InputsUsed(
+                        workbook_path=str(workbook_path),
+                        sheet_names=sheet_names,
+                        row_counts=row_counts,
+                    )
+
+                    # Build RunReport (does not include brief JSON paths yet)
+                    run_report = RunReport(
+                        run_id=run_id,
+                        started_at=started_at_iso,
+                        finished_at=finished_at_iso,
+                        duration_ms=duration_ms,
+                        as_of_date=brief_obj['as_of_date'],
+                        inputs_used=inputs_used,
+                        output_paths=[],  # Will update later
+                        summary_counts=summary_counts,
+                        reasoning_trace=brief.reasoning_trace,
+                        confidence_flags=brief.confidence_flags,
+                        errors=[],
+                        retries=0,
+                    )
+
+                    # Generate deterministic operator brief from RunReport
+                    operator_md, operator_err = generate_operator_brief_markdown(run_report)
+                    brief_write_paths = [str(latest_path), str(dated_path)]
+                    if operator_err:
+                        llm_error = operator_err
+                        log.warning("Operator brief generation error: %s", operator_err)
+                    else:
+                        # Use operator brief as main executive brief (deterministic, no LLM)
+                        if operator_md:
+                            md_path = run_dir / f"executive_brief_{brief_obj['as_of_date']}.md"
+                            md_latest = out_dir / "executive_brief_latest.md"
+                            with open(md_path, "w", encoding="utf-8") as f:
+                                f.write(operator_md)
+                            with open(md_latest, "w", encoding="utf-8") as f:
+                                f.write(operator_md)
+                            brief_write_paths.append(str(md_path))
+                            log.info(f"Executive brief (deterministic) written to {md_latest}")
+                        else:
+                            # Fallback to manual markdown if operator brief generation failed
+                            md_path = run_dir / f"executive_brief_{brief_obj['as_of_date']}.md"
+                            with open(md_path, "w", encoding="utf-8") as f:
+                                f.write("\n".join(md_lines))
+                            brief_write_paths.append(str(md_path))
+
+                    # Update output paths to include brief JSON/MD files
+                    run_report.output_paths = brief_write_paths
+
+                    # Render Markdown version of RunReport
+                    run_report_md = render_run_report_md(run_report)
+                    run_report_latest_md_path = out_dir / "run_report_latest.md"
+                    run_report_dated_md_path = run_dir / f"run_report_{run_id}.md"
+
+                    with open(run_report_latest_md_path, "w", encoding="utf-8") as f:
+                        f.write(run_report_md)
+                    with open(run_report_dated_md_path, "w", encoding="utf-8") as f:
+                        f.write(run_report_md)
+
+                    log.info(f"Run Report Markdown written to {run_report_latest_md_path} and {run_report_dated_md_path}")
+                    print(f"Run Report Markdown written to {run_report_latest_md_path}")
+
+                    # If any error occurred, record it once
+                    if llm_error and llm_error not in run_report.errors:
+                        run_report.errors.append(llm_error)
+                        run_report.confidence_flags.append(f"LLM_UNAVAILABLE: {llm_error}")
+
+                    # Persist RunReport (after possibly recording operator errors)
+                    run_latest_path = out_dir / "run_latest.json"
+                    run_dated_path = run_dir / f"run_{run_id}.json"
+
+                    with open(run_latest_path, "w", encoding="utf-8") as f:
+                        f.write(run_report.to_json_str(indent=2))
+                    with open(run_dated_path, "w", encoding="utf-8") as f:
+                        f.write(run_report.to_json_str(indent=2))
+
+                    log.info(f"RunReport written to {run_latest_path} and {run_dated_path}")
+                    print(f"\nRunReport written to {run_latest_path}")
 
                     log.info("Executive brief written successfully")
+                
                 except Exception as e:
                     log.exception("Failed to write executive brief: %s", e)
 

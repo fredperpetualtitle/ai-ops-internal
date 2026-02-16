@@ -3,5 +3,13 @@ venv/
 __pycache__/
 *.pyc
 .env
+.env.*
 .DS_Store
+
+# Ignore data/input Excel workbooks
+data/input/*.xlsx
+
+# Ignore generic output and local output folder
+output/
 data/output/
+

@@ -1,0 +1,30 @@
+name: Daily AI-Ops Brief
+
+on:
+  schedule:
+    - cron: '0 13 * * *' # 8am EST (UTC+5)
+  workflow_dispatch:
+
+jobs:
+  run-daily-brief:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+      - name: Set up Google credentials
+        env:
+          GOOGLE_CREDS: ${{ secrets.GOOGLE_CREDS_JSON }}
+        run: |
+          echo "$GOOGLE_CREDS" > google_creds.json
+      - name: Run daily brief
+        env:
+          GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
+          GOOGLE_CREDS_PATH: google_creds.json
+        run: |
+          python src/main.py

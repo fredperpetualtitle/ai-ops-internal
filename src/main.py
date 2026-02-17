@@ -16,16 +16,17 @@ def main():
     rows_read = 0
     output_written_to = ''
     try:
-        kpi_rows, kpi_err = connector.read_tab('KPI_Snapshot')
-        sheets_read.append('KPI_Snapshot')
+        # Use real tab names for reading input data
+        kpi_rows, kpi_err = connector.read_tab('DAILY_KPI_SNAPSHOT')
+        sheets_read.append('DAILY_KPI_SNAPSHOT')
         if kpi_err:
-            error_message += f"KPI_Snapshot error: {kpi_err}\n"
+            error_message += f"DAILY_KPI_SNAPSHOT error: {kpi_err}\n"
             status = 'fail'
             kpi_rows = []
-        task_rows, task_err = connector.read_tab('Tasks')
-        sheets_read.append('Tasks')
+        task_rows, task_err = connector.read_tab('TASK_ACCOUNTABILITY_TRACKER')
+        sheets_read.append('TASK_ACCOUNTABILITY_TRACKER')
         if task_err:
-            error_message += f"Tasks error: {task_err}\n"
+            error_message += f"TASK_ACCOUNTABILITY_TRACKER error: {task_err}\n"
             task_rows = []
         rows_read = len(kpi_rows) + (len(task_rows) if task_rows else 0)
         brief = generate_brief(kpi_rows, task_rows)

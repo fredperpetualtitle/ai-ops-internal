@@ -18,12 +18,15 @@ class SheetsConnector:
         self.sheet = self.client.open_by_key(sheet_id)
 
     def read_tab(self, tab_name):
+        import datetime
+        print(f"[{datetime.datetime.utcnow().isoformat()}Z] Reading tab: {tab_name} from sheet: {self.sheet_id}")
         try:
             ws = self.sheet.worksheet(tab_name)
             rows = ws.get_all_records()
-            return rows
+            return rows, None
         except Exception as e:
-            return None, str(e)
+            print(f"[{datetime.datetime.utcnow().isoformat()}Z] ERROR reading tab {tab_name}: {e}")
+            return [], str(e)
 
     def write_row(self, tab_name, row):
         try:

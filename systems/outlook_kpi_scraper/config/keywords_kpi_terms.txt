@@ -1,0 +1,45 @@
+# KPI terms – used to score candidate relevance
+# One term per line, case-insensitive matching
+kpi
+daily kpi
+snapshot
+executive brief
+revenue
+cash
+cash balance
+bank balance
+pipeline
+pipeline value
+closings
+closed
+funded
+settled
+orders
+order count
+new orders
+open orders
+occupancy
+occupied
+% occupied
+occupancy rate
+collections
+deposits
+escrow
+month to date
+mtd
+ytd
+year to date
+booked
+gross revenue
+income
+sales
+net income
+in contract
+pipeline total
+weekly report
+daily report
+monthly report
+financial summary
+p&l
+profit and loss
+balance sheet

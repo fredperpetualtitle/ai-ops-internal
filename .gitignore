@@ -16,3 +16,7 @@ data/output/
 # --- Local secrets for Outlook KPI scraper ---
 systems/outlook_kpi_scraper/secrets/
 systems/outlook_kpi_scraper/.env
+
+# --- Outlook KPI scraper runtime artifacts ---
+systems/outlook_kpi_scraper/logs/
+systems/outlook_kpi_scraper/data/ledger.db

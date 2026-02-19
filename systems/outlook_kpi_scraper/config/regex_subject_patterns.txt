@@ -1,0 +1,9 @@
+kpi
+snapshot
+daily
+mtd
+report
+pipeline
+revenue
+cash
+occupancy

@@ -1,0 +1,6 @@
+# Deal keywords – used to identify deal/transaction related emails (stub)
+# One term per line, case-insensitive matching
+closing date
+settlement
+purchase agreement
+acquisition

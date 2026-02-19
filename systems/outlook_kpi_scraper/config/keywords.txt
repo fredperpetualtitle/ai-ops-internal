@@ -7,3 +7,16 @@ closings
 orders
 occupancy
 report
+month to date
+ytd
+booked
+deposits
+escrow
+open orders
+new orders
+closing
+occupancy rate
+collections
+cash balance
+pipeline total
+in contract

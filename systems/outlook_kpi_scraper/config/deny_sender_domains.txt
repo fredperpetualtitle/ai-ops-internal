@@ -1,0 +1,37 @@
+# Denied sender domains – emails from these domains are excluded
+# One domain per line
+# Newsletters / marketing
+cryptobriefing.com
+theinformation.com
+beehiiv.com
+medium.com
+substack.com
+mailchimp.com
+constantcontact.com
+hubspot.com
+# News outlets
+nytimes.com
+forbes.com
+bloomberg.com
+wsj.com
+cnbc.com
+reuters.com
+# Retail / consumer
+lowes.com
+krispykreme.com
+costco.com
+target.com
+walmart.com
+amazon.com
+bestbuy.com
+homedepot.com
+# Quarantine / security
+appriver.com
+proofpoint.com
+mimecast.com
+barracuda.com
+# Social media
+linkedin.com
+facebook.com
+twitter.com
+instagram.com

@@ -1,0 +1,8 @@
+# People keywords – sender names / email addresses treated as high-signal
+# One entry per line
+Ashley Harrison
+Matt Bowman
+Terrence Fay
+Morgan Launikitus
+Morgan (Perpetual)
+chip@plowsharescapital.com

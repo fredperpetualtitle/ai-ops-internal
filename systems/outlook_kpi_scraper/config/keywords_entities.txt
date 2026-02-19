@@ -1,0 +1,23 @@
+# Entity keywords – used to classify emails to a portfolio entity
+# One keyword/phrase per line, case-insensitive matching
+Triple Crown Senior Living
+Direct GP Investments
+Plowshares Capital
+BlockChange Louisville
+Chip-Shot
+Chip Shot
+EscrowX
+Escrow X
+Perpetual Title
+Tokenization Initiatives
+Equine Blocks
+Strategic Advisory Positions
+Louisville Low Voltage
+Louisville Voltage
+DomiDocs
+Sapphire Fiduciary
+Assisted Living Transitions
+PropTech Lab
+Astrella Fund LLC
+River Bend
+Perpetual

@@ -13,3 +13,6 @@ data/input/*.xlsx
 output/
 data/output/
 
+# --- Local secrets for Outlook KPI scraper ---
+systems/outlook_kpi_scraper/secrets/
+systems/outlook_kpi_scraper/.env

@@ -21,3 +21,7 @@ PropTech Lab
 Astrella Fund LLC
 River Bend
 Perpetual
+# Added entities
+Direct GP
+ChipShot
+BlockChange

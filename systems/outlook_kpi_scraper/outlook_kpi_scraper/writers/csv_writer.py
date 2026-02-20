@@ -8,7 +8,7 @@ class CSVWriter:
         self.csv_path = os.path.join(out_dir, 'latest_rows.csv')
 
     def append_row(self, row):
-        header = ['date','entity','revenue','cash','pipeline_value','closings_count','orders_count','occupancy','alerts','notes']
+        header = ['date','entity','revenue','cash','pipeline_value','closings_count','orders_count','occupancy','alerts','notes','run_id','message_id','sender','subject','candidate_score','candidate_reasons','source_type','attachment_name','evidence_snippet','extractor_version','confidence','validation_flags']
         write_header = not os.path.exists(self.csv_path)
         with open(self.csv_path, 'a', newline='') as f:
             writer = csv.DictWriter(f, fieldnames=header)

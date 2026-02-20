@@ -73,7 +73,7 @@ class OutlookReader:
                     att_meta = self._get_attachment_meta(item)
                     has_attachments = len(att_meta) > 0
                     att_names = ";".join(a["name"] for a in att_meta)
-                    kpi_exts = {".xlsx", ".csv", ".pdf"}
+                    kpi_exts = {".xlsx", ".xls", ".csv", ".pdf", ".docx"}
                     has_kpi_attachment = any(a["ext"] in kpi_exts for a in att_meta)
 
                     entry_id = getattr(item, 'EntryID', None)

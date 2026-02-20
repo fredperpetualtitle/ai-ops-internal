@@ -9,3 +9,13 @@ google-auth-oauthlib
 pandas
 openpyxl
 pypdf
+pdfminer.six
+xlrd
+python-docx
+
+# OCR / scanned-PDF support (local, no API calls)
+pdf2image
+pytesseract
+pillow
+rapidfuzz
+opencv-python

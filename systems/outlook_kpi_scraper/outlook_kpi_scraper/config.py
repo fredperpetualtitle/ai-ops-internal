@@ -1,10 +1,15 @@
 """
 Configuration loader – reads keyword files, allowlists, deny lists,
 and entity aliases from the config/ directory.
+
+Includes startup validator that normalizes and deduplicates lists.
 """
 
+import logging
 import os
 import yaml
+
+log = logging.getLogger(__name__)
 
 
 def _config_path(filename):
@@ -64,3 +69,84 @@ def load_all_keywords():
     kws.update(load_keywords_entities())
     kws.update(load_keywords_deals())
     return sorted(kws)
+
+
+def load_trusted_senders():
+    """Load trusted_senders.txt, normalize (strip, lower), dedupe."""
+    raw = _load_lines('trusted_senders.txt')
+    deduped = sorted(set(raw))
+    return deduped
+
+
+def load_trusted_sender_domains():
+    """Load trusted_sender_domains.txt, normalize (strip, lower), dedupe."""
+    raw = _load_lines('trusted_sender_domains.txt')
+    deduped = sorted(set(raw))
+    return deduped
+
+
+def validate_startup_config():
+    """Run at startup: load, normalize, dedupe config files, log counts + top entries.
+
+    Returns a dict with 'trusted_senders', 'trusted_domains' for downstream use.
+    """
+    senders = load_trusted_senders()
+    domains = load_trusted_sender_domains()
+
+    log.info("=== Config Validation ===")
+    log.info("trusted_senders.txt: %d entries | top 5: %s", len(senders), senders[:5])
+    log.info("trusted_sender_domains.txt: %d entries | top 5: %s", len(domains), domains[:5])
+
+    # Check for dependency availability
+    _check_dependencies()
+
+    return {"trusted_senders": senders, "trusted_domains": domains}
+
+
+def _check_dependencies():
+    """Check and log availability of optional parsing libraries."""
+    # PDF library
+    pdf_lib = None
+    pdf_version = None
+    try:
+        import pypdf
+        pdf_lib = "pypdf"
+        pdf_version = getattr(pypdf, "__version__", "unknown")
+    except ImportError:
+        pass
+
+    if pdf_lib is None:
+        try:
+            import pdfminer
+            pdf_lib = "pdfminer.six"
+            pdf_version = getattr(pdfminer, "__version__", "unknown")
+        except ImportError:
+            pass
+
+    if pdf_lib:
+        log.info("PDF parsing: ENABLED (%s v%s)", pdf_lib, pdf_version)
+    else:
+        log.warning("PDF parsing: DISABLED (missing pypdf/pdfminer). To enable: pip install -r requirements.txt")
+
+    # XLS library
+    try:
+        import xlrd
+        xlrd_version = getattr(xlrd, "__version__", "unknown")
+        log.info("XLS parsing: ENABLED (xlrd v%s)", xlrd_version)
+    except ImportError:
+        log.warning("XLS parsing: DISABLED (missing xlrd). To enable: pip install xlrd")
+
+    # XLSX library
+    try:
+        import openpyxl
+        openpyxl_version = getattr(openpyxl, "__version__", "unknown")
+        log.info("XLSX parsing: ENABLED (openpyxl v%s)", openpyxl_version)
+    except ImportError:
+        log.warning("XLSX parsing: DISABLED (missing openpyxl). To enable: pip install openpyxl")
+
+    # DOCX library
+    try:
+        import docx
+        log.info("DOCX parsing: ENABLED (python-docx)")
+    except ImportError:
+        log.warning("DOCX parsing: DISABLED (missing python-docx). To enable: pip install python-docx")

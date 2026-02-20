@@ -207,6 +207,18 @@ def filter_candidates(
         score += 4
         reasons.append("kpi_attachment")
 
+    # Attachment filename keyword boost
+    att_names = (msg.get("attachment_names") or "").lower()
+    _FILENAME_KPI_KEYWORDS = {
+        "report", "financial", "kpi", "dashboard", "weekly", "monthly",
+        "cash", "occupancy", "pipeline", "orders", "closings", "revenue",
+        "snapshot", "summary", "daily", "p&l", "balance", "income",
+        "statement", "model",
+    }
+    if att_names and any(kw in att_names for kw in _FILENAME_KPI_KEYWORDS):
+        score += 2
+        reasons.append("filename_kpi_keyword")
+
     # ------------------------------------------------------------------
     # Penalties
     # ------------------------------------------------------------------

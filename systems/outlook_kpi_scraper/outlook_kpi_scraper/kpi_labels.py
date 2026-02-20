@@ -12,24 +12,27 @@ KPI_SYNONYMS: dict[str, list[str]] = {
     "cash": [
         "cash", "cash balance", "bank balance", "cash on hand",
         "available cash", "total cash", "checking", "savings",
+        "ending balance", "current balance", "ending cash",
     ],
     "pipeline_value": [
         "pipeline", "pipeline value", "pipeline $", "pipeline total",
         "in contract", "contracts in pipeline", "pending pipeline",
-        "active pipeline",
+        "active pipeline", "pipeline balance",
     ],
     "closings_count": [
         "closings", "closed", "funded", "settled", "files closed",
         "closings count", "closed count", "units closed", "transactions closed",
+        "closings today",
     ],
     "orders_count": [
         "orders", "order count", "new orders", "open orders",
         "orders count", "total orders", "files opened", "new files",
+        "order volume",
     ],
     "occupancy": [
         "occupancy", "occ", "occupied", "% occupied",
         "occupancy rate", "census", "bed occupancy",
-        "unit occupancy", "occupancy %",
+        "unit occupancy", "occupancy %", "census count",
     ],
 }
 

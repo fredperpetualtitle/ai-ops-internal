@@ -21,6 +21,10 @@ log = logging.getLogger(__name__)
 COLUMN_ORDER = [
     "date", "entity", "revenue", "cash", "pipeline_value",
     "closings_count", "orders_count", "occupancy", "alerts", "notes",
+    "run_id", "message_id", "sender", "subject", "candidate_score",
+    "candidate_reasons", "source_type", "attachment_name",
+    "evidence_snippet", "extractor_version", "confidence",
+    "validation_flags",
 ]
 
 # Tunables

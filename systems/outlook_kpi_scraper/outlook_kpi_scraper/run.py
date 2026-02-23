@@ -145,16 +145,34 @@ def _debug_attachment(file_path: str):
     if suit["reject_hits"]:
         print(f"  Reject hits: {suit['reject_hits']}")
 
-    # ---- KPI extraction ----
+    # ---- KPI extraction (uses the same logic as attachment_extractor._scan_row) ----
     import re as _re
-    from outlook_kpi_scraper.kpi_labels import match_label
+    from outlook_kpi_scraper.kpi_labels import match_label, _REVERSE
     from outlook_kpi_scraper.kpi_extractor import parse_money, parse_percent
+
+    _MONEY_DBG = _re.compile(r"[\$]?\s*[\-\(]?\s*[\d,]+\.?\d*\s*[kKmMbB]?\s*\)?")
+
+    def _dbg_parse_value(raw, field):
+        if not raw:
+            return None
+        raw = raw.strip()
+        if field == "occupancy":
+            if "%" in raw:
+                return parse_percent(raw)
+            v = parse_money(raw)
+            if v is not None and 0 < v <= 100:
+                return v / 100.0
+            return v
+        if "count" in field:
+            v = parse_money(raw)
+            return int(v) if v is not None else None
+        return parse_money(raw)
 
     kpi: dict = {}
     kpi_evidence: list[str] = []
 
     for line_num, line in enumerate(text.splitlines(), 1):
-        parts = _re.split(r"[:\t|]+", line)
+        parts = _re.split(r"[:\t|]+|\s{2,}", line)
         for i, cell in enumerate(parts):
             cell_stripped = cell.strip()
             if not cell_stripped:
@@ -165,12 +183,7 @@ def _debug_attachment(file_path: str):
                 if len(sub) == 2:
                     field = match_label(sub[0])
                     if field and field not in kpi:
-                        val = parse_money(sub[1]) if "count" not in field and field != "occupancy" else None
-                        if field == "occupancy":
-                            val = parse_percent(sub[1]) if "%" in sub[1] else parse_money(sub[1])
-                        elif "count" in field:
-                            v = parse_money(sub[1])
-                            val = int(v) if v is not None else None
+                        val = _dbg_parse_value(sub[1], field)
                         if val is not None:
                             kpi[field] = val
                             ev_line = line.strip()[:120]
@@ -178,20 +191,30 @@ def _debug_attachment(file_path: str):
                 continue
             if field in kpi:
                 continue
+            found = False
             for j in range(i + 1, min(i + 4, len(parts))):
-                raw = parts[j].strip()
-                if "count" in field:
-                    v = parse_money(raw)
-                    val = int(v) if v is not None else None
-                elif field == "occupancy":
-                    val = parse_percent(raw) if "%" in raw else parse_money(raw)
-                else:
-                    val = parse_money(raw)
+                val = _dbg_parse_value(parts[j].strip(), field)
                 if val is not None:
                     kpi[field] = val
                     ev_line = line.strip()[:120]
                     kpi_evidence.append(f"line{line_num}: {field}={val} evidence='{ev_line}'")
+                    found = True
                     break
+            # Fallback: label and value share same cell (PDF financial layouts)
+            if not found:
+                cell_lower = cell_stripped.lower()
+                for syn in sorted((s for s, f in _REVERSE.items() if f == field), key=len, reverse=True):
+                    idx = cell_lower.find(syn)
+                    if idx >= 0:
+                        after = cell_stripped[idx + len(syn):]
+                        m = _MONEY_DBG.search(after)
+                        if m:
+                            val = _dbg_parse_value(m.group(0).strip(), field)
+                            if val is not None:
+                                kpi[field] = val
+                                ev_line = line.strip()[:120]
+                                kpi_evidence.append(f"line{line_num}: {field}={val} (same-cell) evidence='{ev_line}'")
+                        break
 
     print(f"\n  Extracted KPIs:")
     if kpi:

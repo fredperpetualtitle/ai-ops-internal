@@ -463,7 +463,7 @@ def _parse_pdf_with_suitability(
     if not text.strip():
         return
     for line_num, line in enumerate(text.splitlines(), 1):
-        parts = re.split(r"[:\t|]+", line)
+        parts = re.split(r"[:\t|]+|\s{2,}", line)
         _scan_row(parts, kpi, evidence,
                   source=f"pdf:{filename}:line{line_num}")
 
@@ -683,7 +683,7 @@ def _parse_pdf(path: str, kpi: dict, evidence: list):
 
     # Scan line-by-line
     for line_num, line in enumerate(text.splitlines(), 1):
-        parts = re.split(r"[:\t|]+", line)
+        parts = re.split(r"[:\t|]+|\s{2,}", line)
         _scan_row(parts, kpi, evidence,
                   source=f"pdf:{os.path.basename(path)}:line{line_num}")
 
@@ -708,7 +708,7 @@ def _parse_docx(path: str, kpi: dict, evidence: list):
         text = para.text.strip()
         if not text:
             continue
-        parts = re.split(r"[:\t|]+", text)
+        parts = re.split(r"[:\t|]+|\s{2,}", text)
         _scan_row(parts, kpi, evidence,
                   source=f"docx:{os.path.basename(path)}:para{p_idx + 1}")
 
@@ -721,6 +721,10 @@ def _scan_row(cells: list[str], kpi: dict, evidence: list, source: str):
     """Walk cells left-to-right; when a label matches a KPI field, look for
     the nearest numeric value to the right (or in the same cell after a
     separator like ':' or '=' or tab) and store it.
+
+    Fallback: if the label and value share a cell (e.g. "Cash 68,341" from
+    PDF/text with no delimiter), extract the first number that appears after
+    the matched synonym text.
     """
     for i, cell in enumerate(cells):
         cell_stripped = cell.strip()
@@ -742,13 +746,45 @@ def _scan_row(cells: list[str], kpi: dict, evidence: list, source: str):
         # Label found – look right for numeric value
         if field in kpi:
             continue  # already have this field
+        found = False
         for j in range(i + 1, min(i + 4, len(cells))):
             val = _parse_value(cells[j].strip(), field)
             if val is not None:
                 kpi[field] = val
                 evidence.append(f"{source} cell[{i}]->cell[{j}] '{cell_stripped}'->'{cells[j].strip()}' -> {field}={val}")
                 log.debug("KPI hit: %s=%s from %s", field, val, source)
+                found = True
                 break
+        # Fallback: label and value share the same cell (PDF financial layouts)
+        if not found:
+            val = _extract_value_after_label(cell_stripped, field)
+            if val is not None:
+                kpi[field] = val
+                evidence.append(f"{source} cell[{i}] '{cell_stripped}' (same-cell) -> {field}={val}")
+                log.debug("KPI hit (same-cell): %s=%s from %s", field, val, source)
+
+
+def _extract_value_after_label(cell_text: str, field: str):
+    """Extract the first numeric value that appears *after* the KPI synonym
+    within the same cell text.  Handles PDF layouts like 'Cash 68,341' where
+    label and number are separated only by whitespace.
+    """
+    from outlook_kpi_scraper.kpi_labels import _REVERSE
+    cell_lower = cell_text.lower()
+    # Try the longest matching synonym first for precision
+    for syn in sorted((s for s, f in _REVERSE.items() if f == field), key=len, reverse=True):
+        idx = cell_lower.find(syn)
+        if idx < 0:
+            continue
+        after = cell_text[idx + len(syn):]
+        # Find the first money-like token in the remainder
+        m = _MONEY_RE.search(after)
+        if m:
+            val = _parse_value(m.group(0).strip(), field)
+            if val is not None:
+                return val
+        break  # only try the best (longest) matching synonym
+    return None
 
 
 def _parse_value(raw: str, field: str):

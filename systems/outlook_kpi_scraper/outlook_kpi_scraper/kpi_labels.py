@@ -54,6 +54,10 @@ _REJECT_PHRASES = frozenset({
     "tax payables",
     "cost of good sold",
     "cost of goods sold",
+    "revenue code",
+    "article",
+    "slide",
+    "origination volume",
 })
 
 

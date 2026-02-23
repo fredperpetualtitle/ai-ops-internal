@@ -13,6 +13,9 @@ pdfminer.six
 xlrd
 python-docx
 
+# LLM extraction layer (GPT-4o)
+openai>=1.0.0
+
 # OCR / scanned-PDF support (local, no API calls)
 pdf2image
 pytesseract

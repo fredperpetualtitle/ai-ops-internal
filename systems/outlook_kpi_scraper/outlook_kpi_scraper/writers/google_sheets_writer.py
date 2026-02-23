@@ -25,6 +25,9 @@ COLUMN_ORDER = [
     "candidate_reasons", "source_type", "attachment_name",
     "evidence_snippet", "extractor_version", "confidence",
     "validation_flags",
+    # Source mapping columns
+    "source_rule_id", "source_match_score", "source_report_type",
+    "source_parse_confidence",
 ]
 
 # Tunables

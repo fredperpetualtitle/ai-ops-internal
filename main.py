@@ -2,20 +2,36 @@
 from ai_ops.src.core.logger import get_logger
 from ai_ops.src.config.settings import settings
 from ai_ops.src.services.data_loader import DataLoader
+from ai_ops.src.integrations.spreadsheet_client import SpreadsheetClient
 from pathlib import Path
 from typing import Any
 from ai_ops.src.services.sheet_normalizer import SheetNormalizer
 from ai_ops.src.agents.executive_brief_agent import ExecutiveBriefAgent
+from ai_ops.src.agents.deal_risk_agent import DealRiskAgent
+from ai_ops.src.agents.accountability_agent import AccountabilityAgent
 from ai_ops.src.services.narrative_composer import compose_narrative
 from ai_ops.src.core.run_report import RunReport, InputsUsed
 from ai_ops.src.services.run_report_renderer import render_run_report_md
 from ai_ops.src.services.operator_brief_generator import generate_operator_brief_markdown
+from ai_ops.src.services.deal_risk_renderer import render_deal_risk_memo_md
+from ai_ops.src.services.accountability_renderer import render_accountability_report_md
 import json
+import os
 from datetime import date, datetime
 import uuid
 import time
 
 
+def _load_sheets_from_env(log) -> dict:
+    """Load sheet data via SpreadsheetClient (Google Sheets or Excel backend).
+
+    Uses SHEETS_BACKEND env var to decide the backend.  Returns the same
+    dict[str, pd.DataFrame] structure that the rest of the pipeline expects.
+    """
+    client = SpreadsheetClient.from_env()
+    sheets = client.get_all_tabs()
+    log.info("SpreadsheetClient returned %d sheets", len(sheets))
+    return sheets, client
 
 
 def main() -> None:
@@ -31,13 +47,30 @@ def main() -> None:
     loader = DataLoader()
     workbook_path = Path("data/input/master_operating_sheet.xlsx")
 
-    log.info("Loading workbook: %s", str(workbook_path))
+    # --- Data source selection ------------------------------------------------
+    # SHEETS_BACKEND=google  -> read live from Google Sheets via SpreadsheetClient
+    # SHEETS_BACKEND=excel   -> read local .xlsx (original behaviour)
+    # If the env var is unset *and* the local workbook exists, fall back to excel
+    # so we don't break existing local-dev workflows.
+    backend = os.getenv("SHEETS_BACKEND", "").strip().lower()
+    use_google = backend == "google" or (
+        backend not in ("excel",) and not workbook_path.exists()
+    )
+
+    log.info("Loading workbook: %s", "Google Sheets" if use_google else str(workbook_path))
     try:
-        sheets = loader.load_workbook(workbook_path, allow_fallback=False)
+        if use_google:
+            # -- Google Sheets (or SpreadsheetClient-based) path ---------------
+            sheets, _client = _load_sheets_from_env(log)
+            data_source_label = f"Google Sheets ({_client._backend.sheet_id})" if hasattr(_client._backend, "sheet_id") else "SpreadsheetClient"
+        else:
+            # -- Legacy local .xlsx path ---------------------------------------
+            sheets = loader.load_workbook(workbook_path, allow_fallback=False)
+            data_source_label = str(workbook_path)
 
         # sheets: dict[str, pd.DataFrame] or dict[str, SimpleDataFrame] if fallback used
-        log.info("Loaded workbook %s with %d sheets", str(workbook_path), len(sheets))
-        print(f"Loaded workbook {workbook_path} with {len(sheets)} sheets")
+        log.info("Loaded %s with %d sheets", data_source_label, len(sheets))
+        print(f"Loaded {data_source_label} with {len(sheets)} sheets")
 
         for name, df in sheets.items():
             # Determine shape and columns for both pandas and SimpleDataFrame
@@ -314,7 +347,7 @@ def main() -> None:
 
                     # Construct inputs_used
                     inputs_used = InputsUsed(
-                        workbook_path=str(workbook_path),
+                        workbook_path=data_source_label,
                         sheet_names=sheet_names,
                         row_counts=row_counts,
                     )
@@ -399,6 +432,97 @@ def main() -> None:
 
             except Exception as e:
                 print(f"Executive brief error: {e}")
+
+            # ── Agent 2 — Deal Risk & Closing Monitor ──────────────────────
+            try:
+                deal_risk_agent = DealRiskAgent(today=nw.as_of_date)
+                deal_risk_memo = deal_risk_agent.run(nw)
+
+                print(f"\nDEAL RISK MEMO (Agent 2)")
+                print(f"Deals scored: {deal_risk_memo.summary['total_deals']}")
+                print(f"RED: {deal_risk_memo.summary['red']}  YELLOW: {deal_risk_memo.summary['yellow']}  GREEN: {deal_risk_memo.summary['green']}")
+
+                for d in deal_risk_memo.deals:
+                    if d.risk_level in ("RED", "YELLOW"):
+                        print(f"  {d.risk_level}: {d.deal_name} (score {d.risk_score}) — {', '.join(d.risk_drivers[:3])}")
+
+                # Persist Agent 2 outputs
+                try:
+                    out_dir = Path("data/output")
+                    run_dir = out_dir / f"run_{run_id}"
+                    run_dir.mkdir(parents=True, exist_ok=True)
+
+                    memo_json_path = run_dir / f"deal_risk_memo_{run_id}.json"
+                    memo_md_path = run_dir / f"deal_risk_memo_{run_id}.md"
+                    memo_latest_json = out_dir / "deal_risk_memo_latest.json"
+                    memo_latest_md = out_dir / "deal_risk_memo_latest.md"
+
+                    memo_json_str = json.dumps(deal_risk_memo.to_dict(), indent=2, ensure_ascii=False, default=str)
+                    memo_md_str = render_deal_risk_memo_md(deal_risk_memo)
+
+                    for path in (memo_json_path, memo_latest_json):
+                        with open(path, "w", encoding="utf-8") as f:
+                            f.write(memo_json_str)
+                    for path in (memo_md_path, memo_latest_md):
+                        with open(path, "w", encoding="utf-8") as f:
+                            f.write(memo_md_str)
+
+                    log.info("Agent 2 outputs written to %s", run_dir)
+                    print(f"Deal Risk Memo written to {memo_latest_md}")
+
+                except Exception as e:
+                    log.exception("Failed to write Agent 2 outputs: %s", e)
+
+            except Exception as e:
+                print(f"Agent 2 (Deal Risk) error: {e}")
+                log.exception("Agent 2 error: %s", e)
+
+            # ── Agent 3 — Accountability & Follow-Up Engine ────────────────
+            try:
+                accountability_agent = AccountabilityAgent(today=nw.as_of_date)
+                accountability_report = accountability_agent.run(nw)
+
+                print(f"\nACCOUNTABILITY REPORT (Agent 3)")
+                print(f"Tasks scored: {accountability_report.system_summary['total_tasks']}")
+                print(f"Overdue: {accountability_report.system_summary['overdue']}  Blocked: {accountability_report.system_summary['blocked']}")
+
+                for o in accountability_report.owners:
+                    if o.risk_level in ("RED", "YELLOW"):
+                        print(f"  {o.risk_level}: {o.owner} (score {o.score}) — overdue={o.overdue}, blocked={o.blocked}")
+
+                if accountability_report.follow_up_drafts:
+                    print(f"  Follow-up drafts: {len(accountability_report.follow_up_drafts)}")
+
+                # Persist Agent 3 outputs
+                try:
+                    out_dir = Path("data/output")
+                    run_dir = out_dir / f"run_{run_id}"
+                    run_dir.mkdir(parents=True, exist_ok=True)
+
+                    acct_json_path = run_dir / f"accountability_report_{run_id}.json"
+                    acct_md_path = run_dir / f"accountability_report_{run_id}.md"
+                    acct_latest_json = out_dir / "accountability_report_latest.json"
+                    acct_latest_md = out_dir / "accountability_report_latest.md"
+
+                    acct_json_str = json.dumps(accountability_report.to_dict(), indent=2, ensure_ascii=False, default=str)
+                    acct_md_str = render_accountability_report_md(accountability_report)
+
+                    for path in (acct_json_path, acct_latest_json):
+                        with open(path, "w", encoding="utf-8") as f:
+                            f.write(acct_json_str)
+                    for path in (acct_md_path, acct_latest_md):
+                        with open(path, "w", encoding="utf-8") as f:
+                            f.write(acct_md_str)
+
+                    log.info("Agent 3 outputs written to %s", run_dir)
+                    print(f"Accountability Report written to {acct_latest_md}")
+
+                except Exception as e:
+                    log.exception("Failed to write Agent 3 outputs: %s", e)
+
+            except Exception as e:
+                print(f"Agent 3 (Accountability) error: {e}")
+                log.exception("Agent 3 error: %s", e)
 
         except Exception as e:
             print(f"Normalization error: {e}")

@@ -97,10 +97,49 @@ def validate_startup_config():
     log.info("trusted_senders.txt: %d entries | top 5: %s", len(senders), senders[:5])
     log.info("trusted_sender_domains.txt: %d entries | top 5: %s", len(domains), domains[:5])
 
+    # Validate source mapping
+    _validate_source_mapping()
+
     # Check for dependency availability
     _check_dependencies()
 
     return {"trusted_senders": senders, "trusted_domains": domains}
+
+
+def _validate_source_mapping():
+    """Load source_mapping.yml and log validation results."""
+    path = _config_path('source_mapping.yml')
+    if not os.path.exists(path):
+        log.warning("source_mapping.yml NOT FOUND at %s – source-aware parsing disabled", path)
+        return
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            data = yaml.safe_load(f) or {}
+        version = data.get("schema_version", 0)
+        sources = data.get("sources", [])
+        enabled = [s for s in sources if s.get("enabled", True)]
+        rule_ids = [s.get("id", "?") for s in enabled]
+        log.info("source_mapping.yml: schema_version=%s, %d rules (%d enabled)",
+                 version, len(sources), len(enabled))
+        log.info("source_mapping.yml rule IDs: %s", rule_ids)
+
+        # Check for duplicate IDs
+        seen = set()
+        for rid in rule_ids:
+            if rid in seen:
+                log.warning("source_mapping.yml: DUPLICATE rule ID '%s'", rid)
+            seen.add(rid)
+
+        # Validate report types
+        valid_types = {"accounting_export", "title_production", "bank_balance",
+                       "occupancy_census", "pipeline_snapshot"}
+        for s in enabled:
+            rt = s.get("report_type", "")
+            if rt and rt not in valid_types:
+                log.warning("source_mapping.yml: rule '%s' has unknown report_type '%s'",
+                            s.get("id"), rt)
+    except Exception as exc:
+        log.error("source_mapping.yml validation failed: %s", exc)
 
 
 def _check_dependencies():

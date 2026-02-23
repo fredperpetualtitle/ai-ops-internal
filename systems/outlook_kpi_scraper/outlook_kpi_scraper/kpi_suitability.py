@@ -45,6 +45,8 @@ REJECT_KEYWORDS = [
     "equity raise", "capex budget", "replacement cost",
     "investment memorandum", "loan document", "change order",
     "tax bill", "hr agreement", "nda", "agenda",
+    "purchase and sale agreement", "operations transfer agreement",
+    "designation notice",
 ]
 
 # ------------------------------------------------------------------

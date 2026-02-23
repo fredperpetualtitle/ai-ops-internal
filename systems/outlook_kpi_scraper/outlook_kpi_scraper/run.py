@@ -34,6 +34,9 @@ from outlook_kpi_scraper.attachment_extractor import extract_kpis_from_attachmen
 from outlook_kpi_scraper.dep_check import check_ocr_dependencies
 from outlook_kpi_scraper.ledger import Ledger
 from outlook_kpi_scraper.run_logger import RunLogger
+from outlook_kpi_scraper.source_matcher import (
+    load_source_mapping, match_email, validate_extracted_kpis,
+)
 from outlook_kpi_scraper.writers.google_sheets_writer import GoogleSheetsWriter
 from outlook_kpi_scraper.writers.csv_writer import CSVWriter
 from outlook_kpi_scraper.utils import load_env
@@ -327,15 +330,41 @@ def main():
 
     log.info("Candidates: %d / %d scanned", len(candidates), scanned)
 
+    # ---- Source Mapping ----
+    source_cfg = load_source_mapping()
+    source_rules_count = len(source_cfg.get("sources", []))
+    log.info("Source mapping: %d rules loaded", source_rules_count)
+
+    quarantined = []
+
     # ---- Extract KPIs ----
     extracted_rows = []      # list of (entry_id, kpi_row)
     failed_extractions = []
     skipped_no_kpi = 0
+    skipped_quarantine = 0
+    skipped_kpi_validation = 0
 
     for msg in candidates:
         entry_id = msg["entry_id"]
         try:
-            entity = route_entity(msg, entity_aliases)
+            # 0) Source mapping — deterministic rule matching
+            src_match = match_email(msg)
+
+            if not src_match.matched:
+                # Unknown source → quarantine (do NOT blind parse)
+                quarantined.append(msg)
+                skipped_quarantine += 1
+                run_logger.add_quarantined(
+                    msg,
+                    reason="no source rule matched",
+                    top_scores=src_match.all_scores[:3],
+                )
+                log.info("QUARANTINE: sender=%s subject=%s (no source rule)",
+                         msg.get("sender_email"), msg.get("subject"))
+                continue
+
+            # Use entity from source rule if available, else fall back to alias router
+            entity = src_match.entity or route_entity(msg, entity_aliases)
 
             # 1) Attachment-first extraction
             att_kpis = None
@@ -374,6 +403,21 @@ def main():
                           msg.get("sender_email"), msg.get("subject"))
                 continue
 
+            # 3b) Per-source KPI validation
+            kpi_validation = validate_extracted_kpis(kpi_row, src_match)
+            if not kpi_validation["valid"]:
+                skipped_kpi_validation += 1
+                missing = kpi_validation["missing_required"]
+                run_logger.add_skipped_candidate(
+                    msg,
+                    score=msg.get("candidate_score", 0),
+                    reasons=msg.get("candidate_reason", []),
+                    why_skipped=f"required KPIs missing: {', '.join(missing)} (rule={src_match.rule_id})",
+                )
+                log.warning("KPI validation REJECT: rule=%s missing=%s sender=%s",
+                            src_match.rule_id, missing, msg.get("sender_email"))
+                continue
+
             # 4) Compute confidence and attach metadata
             confidence = compute_confidence(kpi_row)
             att_name = att_kpis.get("attachment_names", "") if att_kpis else ""
@@ -394,10 +438,16 @@ def main():
                 kpi_row["evidence_snippet"] = kpi_row["evidence_source"][:120]
             else:
                 kpi_row["evidence_snippet"] = ""
-            kpi_row["extractor_version"] = "v2.1"
+            kpi_row["extractor_version"] = "v3.0-source-mapped"
             kpi_row["confidence"] = confidence
             # Validation flags: anomaly alerts if any
             kpi_row["validation_flags"] = kpi_row.get("alerts", "")
+
+            # Source mapping metadata
+            kpi_row["source_rule_id"] = src_match.rule_id
+            kpi_row["source_match_score"] = round(src_match.match_score, 3)
+            kpi_row["source_report_type"] = src_match.report_type
+            kpi_row["source_parse_confidence"] = kpi_validation.get("parse_confidence", 0.0)
 
             extracted_rows.append((entry_id, kpi_row))
             run_logger.add_extracted_row(
@@ -410,14 +460,17 @@ def main():
                 extraction_proof=proof,
                 confidence_score=confidence,
                 entry_id=entry_id,
+                source_rule_id=src_match.rule_id,
+                source_match_score=src_match.match_score,
             )
 
             if debug:
-                log.info("Extracted: sender=%s entity=%s revenue=%s cash=%s pipeline=%s source=%s",
+                log.info("Extracted: sender=%s entity=%s revenue=%s cash=%s pipeline=%s source=%s rule=%s",
                          msg.get("sender_email"), entity,
                          kpi_row.get("revenue"), kpi_row.get("cash"),
                          kpi_row.get("pipeline_value"),
-                         kpi_row.get("evidence_source", ""))
+                         kpi_row.get("evidence_source", ""),
+                         src_match.rule_id)
 
         except Exception as exc:
             tb = traceback.format_exc()
@@ -436,8 +489,10 @@ def main():
             log.error("Extraction error: sender=%s subject=%s error=%s",
                       msg.get("sender_email"), msg.get("subject"), exc)
 
-    log.info("Extracted: %d rows, skipped_no_kpi=%d, extraction_errors=%d",
-             len(extracted_rows), skipped_no_kpi, len(failed_extractions))
+    log.info("Extracted: %d rows, skipped_no_kpi=%d, quarantined=%d, "
+             "kpi_validation_rejects=%d, extraction_errors=%d",
+             len(extracted_rows), skipped_no_kpi, skipped_quarantine,
+             skipped_kpi_validation, len(failed_extractions))
 
     # ---- Write to Google Sheets (batched) ----
     writer = None
@@ -477,6 +532,8 @@ def main():
         appended_count=appended,
         failed_count=failed_count,
         skipped_no_kpi=skipped_no_kpi,
+        quarantined_count=skipped_quarantine,
+        kpi_validation_rejects=skipped_kpi_validation,
         duration_sec=duration,
         args={
             "days": args.days,
@@ -486,6 +543,7 @@ def main():
             "debug": debug,
             "require_kpi": args.require_kpi,
             "batch_size": args.batch_size,
+            "source_rules": source_rules_count,
         },
     )
 
@@ -501,6 +559,7 @@ def main():
     print(f"  scanned={scanned}  candidates={len(candidates)}  "
           f"extracted={len(extracted_rows)}  appended={appended}  "
           f"failed={failed_count}  skipped_no_kpi={skipped_no_kpi}  "
+          f"quarantined={skipped_quarantine}  kpi_rejects={skipped_kpi_validation}  "
           f"duration={duration:.1f}s")
     print(f"\n  CHIP REVIEW:  {chip_review_path}")
     print(f"  Run log pack: {os.path.abspath(run_logger.run_dir)}")

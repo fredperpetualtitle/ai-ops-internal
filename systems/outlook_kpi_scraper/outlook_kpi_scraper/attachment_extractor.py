@@ -28,6 +28,7 @@ from outlook_kpi_scraper.kpi_labels import match_label, KPI_SYNONYMS
 from outlook_kpi_scraper.kpi_extractor import parse_money, parse_percent
 from outlook_kpi_scraper.ocr_service import extract_pdf_text_with_fallback, ocr_available
 from outlook_kpi_scraper.kpi_suitability import compute_suitability
+from outlook_kpi_scraper.llm_extractor import llm_available, extract_kpis_with_llm, merge_llm_into_regex
 
 log = logging.getLogger(__name__)
 
@@ -270,6 +271,53 @@ def extract_kpis_from_attachments(
                 "PARSE_FAILED", fpath, fname,
                 size=item.get("size", 0), error=str(exc),
             )
+
+    # ------------------------------------------------------------------
+    # LLM enhancement layer (post-regex)
+    # ------------------------------------------------------------------
+    # Determine the best (lowest) suitability tier seen across attachments
+    # by parsing the evidence strings already recorded during parsing.
+    best_tier = 4
+    for ev in evidence:
+        m = re.search(r"suitability \S+ tier=(\d+)", ev)
+        if m:
+            best_tier = min(best_tier, int(m.group(1)))
+
+    kpi_count = sum(1 for f in KPI_SYNONYMS if kpi.get(f) is not None)
+    should_llm = (best_tier == 1) or (best_tier == 2 and kpi_count <= 1)
+
+    if should_llm and llm_available():
+        log.info("LLM trigger: best_tier=%d kpi_count=%d – invoking GPT-4o",
+                 best_tier, kpi_count)
+        llm_text, doc_type, rep_fname = _collect_text_for_llm(saved_files)
+        if llm_text.strip():
+            # Log regex results before LLM merge for audit trail
+            regex_snapshot = {f: kpi.get(f) for f in KPI_SYNONYMS}
+            evidence.append(f"LLM:pre-merge regex_kpis={regex_snapshot}")
+
+            llm_result = extract_kpis_with_llm(
+                text=llm_text,
+                doc_type=doc_type,
+                filename=rep_fname,
+            )
+            if llm_result is not None:
+                kpi = merge_llm_into_regex(
+                    regex_kpi=kpi,
+                    llm_result=llm_result,
+                    evidence=evidence,
+                    source=rep_fname,
+                )
+                log.info("LLM merge complete for %s – final KPIs: %s",
+                         rep_fname,
+                         {f: kpi.get(f) for f in KPI_SYNONYMS})
+            else:
+                evidence.append("LLM:call returned None (parse failure or API error)")
+        else:
+            evidence.append("LLM:skipped (no extractable text from attachments)")
+    elif should_llm:
+        evidence.append("LLM:skipped (LLM not available – check OPENAI_API_KEY)")
+        log.debug("LLM would trigger (tier=%d kpi=%d) but LLM not available",
+                  best_tier, kpi_count)
 
     if not _has_kpi_value(kpi):
         return None
@@ -689,7 +737,10 @@ def _parse_pdf(path: str, kpi: dict, evidence: list):
 
 
 def _parse_docx(path: str, kpi: dict, evidence: list):
-    """Parse a DOCX file for KPI labels + values (tables + paragraphs)."""
+    """Parse a DOCX file for KPI labels + values (tables + paragraphs).
+
+    Now includes suitability gating to reject legal/editorial documents.
+    """
     log.debug("Parsing DOCX: %s", path)
     try:
         from docx import Document
@@ -697,12 +748,38 @@ def _parse_docx(path: str, kpi: dict, evidence: list):
         log.warning("python-docx not installed – skipping DOCX parsing")
         return
     doc = Document(path)
+
+    # ---- Suitability check: gather full text, score it ----
+    all_parts: list[str] = []
+    for table in doc.tables:
+        for row in table.rows:
+            all_parts.append(" ".join(cell.text.strip() for cell in row.cells))
+    for para in doc.paragraphs:
+        t = para.text.strip()
+        if t:
+            all_parts.append(t)
+    full_text = "\n".join(all_parts)
+
+    filename = os.path.basename(path)
+    suit = compute_suitability(full_text, filename=filename, is_pdf=False)
+    if suit["tier"] == 4:
+        log.info("SUITABILITY REJECT (Tier 4) docx %s: %s",
+                 filename, "; ".join(suit["reasons"]))
+        _log_attachment_decision(
+            "SUIT_REJECT", path, filename,
+            size=os.path.getsize(path), suitability=suit)
+        return
+
+    evidence.append(
+        f"suitability docx:{filename} tier={suit['tier']} score={suit['score']}"
+    )
+
     # Tables first (most structured)
     for t_idx, table in enumerate(doc.tables):
         for r_idx, row in enumerate(table.rows):
             str_row = [cell.text.strip() for cell in row.cells]
             _scan_row(str_row, kpi, evidence,
-                      source=f"docx:{os.path.basename(path)}:table{t_idx + 1}:row{r_idx + 1}")
+                      source=f"docx:{filename}:table{t_idx + 1}:row{r_idx + 1}")
     # Then paragraphs
     for p_idx, para in enumerate(doc.paragraphs):
         text = para.text.strip()
@@ -710,7 +787,92 @@ def _parse_docx(path: str, kpi: dict, evidence: list):
             continue
         parts = re.split(r"[:\t|]+|\s{2,}", text)
         _scan_row(parts, kpi, evidence,
-                  source=f"docx:{os.path.basename(path)}:para{p_idx + 1}")
+                  source=f"docx:{filename}:para{p_idx + 1}")
+
+
+# ------------------------------------------------------------------
+# Internal: LLM text collection (for post-regex enhancement)
+# ------------------------------------------------------------------
+
+def _extract_spreadsheet_text(path: str, ext: str, max_rows: int = 100) -> str:
+    """Extract spreadsheet content as plain text for LLM consumption."""
+    parts: list[str] = []
+    try:
+        if ext == ".xlsx":
+            import openpyxl
+            wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+            for ws in wb.worksheets[:3]:
+                for row_num, row in enumerate(ws.iter_rows(values_only=True), 1):
+                    if row_num > max_rows:
+                        break
+                    parts.append(" | ".join(str(c) for c in row if c is not None))
+            wb.close()
+        elif ext == ".xls":
+            import xlrd
+            wb = xlrd.open_workbook(path)
+            for ws in wb.sheets():
+                for row_num in range(min(ws.nrows, max_rows)):
+                    parts.append(" | ".join(
+                        str(ws.cell_value(row_num, col))
+                        for col in range(ws.ncols)
+                        if ws.cell_value(row_num, col)
+                    ))
+    except Exception as exc:
+        log.debug("Spreadsheet text extraction failed for %s: %s", path, exc)
+    return "\n".join(parts)
+
+
+def _extract_docx_text(path: str) -> str:
+    """Extract DOCX content as plain text for LLM consumption."""
+    try:
+        from docx import Document
+        doc = Document(path)
+        parts: list[str] = []
+        for table in doc.tables:
+            for row in table.rows:
+                parts.append(" | ".join(cell.text.strip() for cell in row.cells))
+        for para in doc.paragraphs:
+            t = para.text.strip()
+            if t:
+                parts.append(t)
+        return "\n".join(parts)
+    except Exception as exc:
+        log.debug("DOCX text extraction failed for %s: %s", path, exc)
+        return ""
+
+
+def _collect_text_for_llm(saved_files: list[dict]) -> tuple[str, str, str]:
+    """Re-extract text from saved attachments for LLM processing.
+
+    Returns (combined_text, doc_type, representative_filename).
+    Files are processed in priority order; first file with text wins
+    as the representative.
+    """
+    texts: list[str] = []
+    doc_type = "unknown"
+    rep_filename = ""
+    for item in sorted(saved_files, key=lambda f: _EXT_PRIORITY.get(f["ext"], 99)):
+        ext = item["ext"]
+        fpath = item["path"]
+        fname = item["name"]
+        chunk = ""
+        try:
+            if ext == ".csv":
+                chunk = _read_text_sample(fpath, max_bytes=12000)
+            elif ext in (".xlsx", ".xls"):
+                chunk = _extract_spreadsheet_text(fpath, ext)
+            elif ext == ".pdf":
+                chunk, _ = extract_pdf_text_with_fallback(fpath)
+            elif ext == ".docx":
+                chunk = _extract_docx_text(fpath)
+        except Exception as exc:
+            log.debug("LLM text collection failed for %s: %s", fname, exc)
+        if chunk and chunk.strip():
+            texts.append(chunk)
+            if not rep_filename:
+                rep_filename = fname
+                doc_type = ext.lstrip(".")
+    return "\n\n".join(texts), doc_type, rep_filename
 
 
 # ------------------------------------------------------------------
@@ -788,7 +950,11 @@ def _extract_value_after_label(cell_text: str, field: str):
 
 
 def _parse_value(raw: str, field: str):
-    """Parse a raw string into the appropriate numeric type for *field*."""
+    """Parse a raw string into the appropriate numeric type for *field*.
+
+    Applies minimum-value sanity thresholds to reject obviously bogus
+    extractions (e.g. "Slide 6" → 6.0 for revenue).
+    """
     if not raw:
         return None
     raw = raw.strip()
@@ -802,7 +968,18 @@ def _parse_value(raw: str, field: str):
     if "count" in field:
         v = parse_money(raw)
         return int(v) if v is not None else None
-    return parse_money(raw)
+    v = parse_money(raw)
+    if v is not None:
+        # Minimum value thresholds – reject tiny/implausible KPI values
+        # and values that look like years (1900-2099)
+        if field in ("revenue", "cash", "pipeline_value"):
+            if v < 100:
+                log.debug("Rejecting %s=%s (below min threshold 100)", field, v)
+                return None
+            if 1900 <= v <= 2099:
+                log.debug("Rejecting %s=%s (looks like a year)", field, v)
+                return None
+    return v
 
 
 # ------------------------------------------------------------------

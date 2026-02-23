@@ -24,5 +24,17 @@ class Settings:
     LLM_TEMPERATURE: float = float(os.getenv("LLM_TEMPERATURE", "0.2"))
     LLM_MAX_TOKENS: int = int(os.getenv("LLM_MAX_TOKENS", "1200"))
 
+    # Spreadsheet / Sheets bridge
+    SHEETS_BACKEND: str = os.getenv("SHEETS_BACKEND", "google")
+    SPREADSHEET_ID: str = os.getenv("SPREADSHEET_ID", os.getenv("GOOGLE_SHEET_ID", ""))
+    SPREADSHEET_URL: str = os.getenv("SPREADSHEET_URL", "")
+    SPREADSHEET_PATH: str = os.getenv("SPREADSHEET_PATH", "data/input/master_operating_sheet.xlsx")
+
+    # Optional tab-name overrides
+    SHEETS_TAB_KPI: str = os.getenv("SHEETS_TAB_KPI", "")
+    SHEETS_TAB_DEALS: str = os.getenv("SHEETS_TAB_DEALS", "")
+    SHEETS_TAB_TASKS: str = os.getenv("SHEETS_TAB_TASKS", "")
+    SHEETS_TAB_WEEKLY: str = os.getenv("SHEETS_TAB_WEEKLY", "")
+
 
 settings = Settings()

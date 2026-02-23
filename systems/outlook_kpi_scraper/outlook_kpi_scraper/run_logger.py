@@ -41,6 +41,9 @@ class RunLogger:
         "candidate_reasons", "source_type", "attachment_name",
         "evidence_snippet", "extractor_version", "confidence",
         "validation_flags",
+        # Source mapping fields
+        "source_rule_id", "source_match_score", "source_report_type",
+        "source_parse_confidence",
         # Internal tracking fields (not sent to sheet)
         "evidence_source", "sender_email", "sheet_name",
         "cell_reference", "extraction_proof", "confidence_score",
@@ -72,6 +75,7 @@ class RunLogger:
         # ---- accumulators ----
         self._candidates: list[dict] = []
         self._skipped_candidates: list[dict] = []
+        self._quarantined: list[dict] = []
         self._extracted: list[dict] = []
         self._append_results: list[dict] = []
         self._summary: dict = {}
@@ -153,6 +157,22 @@ class RunLogger:
             "sender": sender, "subject": subject, "error": error,
         })
 
+    def add_quarantined(self, msg: dict, reason: str = "",
+                        top_scores: list | None = None):
+        """Track a quarantined email (no source rule matched)."""
+        self._quarantined.append({
+            "sender_email": msg.get("sender_email", ""),
+            "sender_domain": (msg.get("sender_email") or "").split("@")[-1]
+                             if "@" in (msg.get("sender_email") or "") else "",
+            "subject": msg.get("subject", ""),
+            "received_dt": msg.get("received_dt", ""),
+            "score": msg.get("candidate_score", 0),
+            "reason": reason,
+            "top_scores": str(top_scores or []),
+            "has_attachments": msg.get("has_attachments", False),
+            "attachment_names": msg.get("attachment_names", ""),
+        })
+
     # ------------------------------------------------------------------
     # Extracted-row tracking
     # ------------------------------------------------------------------
@@ -161,7 +181,9 @@ class RunLogger:
                           source_type: str = "", attachment_name: str = "",
                           sheet_name: str = "", cell_reference: str = "",
                           extraction_proof: str = "", confidence_score: float = 0.0,
-                          entry_id: str = ""):
+                          entry_id: str = "",
+                          source_rule_id: str = "",
+                          source_match_score: float = 0.0):
         row = dict(kpi_row)
         row["sender_email"] = sender_email
         row["subject"] = subject
@@ -172,6 +194,8 @@ class RunLogger:
         row["cell_reference"] = cell_reference
         row["extraction_proof"] = extraction_proof or row.get("evidence_source", "")[:200]
         row["confidence_score"] = confidence_score
+        row["source_rule_id"] = source_rule_id or row.get("source_rule_id", "")
+        row["source_match_score"] = source_match_score or row.get("source_match_score", 0.0)
         # Build short evidence string for sheet output
         if source_type == "attachment" and attachment_name:
             row["evidence"] = f"attachment: {attachment_name}" + (f" sheet={sheet_name}" if sheet_name else "")
@@ -207,6 +231,8 @@ class RunLogger:
     def set_summary(self, *, scanned: int, candidate_count: int,
                     extracted_count: int, appended_count: int,
                     failed_count: int, skipped_no_kpi: int = 0,
+                    quarantined_count: int = 0,
+                    kpi_validation_rejects: int = 0,
                     duration_sec: float = 0, args: dict | None = None):
         self._summary = {
             "run_id": self.run_id,
@@ -217,6 +243,8 @@ class RunLogger:
             "appended_count": appended_count,
             "failed_count": failed_count,
             "skipped_no_kpi": skipped_no_kpi,
+            "quarantined_count": quarantined_count,
+            "kpi_validation_rejects": kpi_validation_rejects,
             "duration_sec": round(duration_sec, 2),
             "args": args or {},
         }
@@ -229,6 +257,10 @@ class RunLogger:
         self._write_csv("candidates.csv", self.CANDIDATE_FIELDS, all_candidates)
         self._write_csv("extracted_rows.csv", self.KPI_FIELDS, self._extracted)
         self._write_csv("append_results.csv", self.APPEND_FIELDS, self._append_results)
+        if self._quarantined:
+            q_fields = ["sender_email", "sender_domain", "subject", "received_dt",
+                        "score", "reason", "top_scores", "has_attachments", "attachment_names"]
+            self._write_csv("quarantined.csv", q_fields, self._quarantined)
         self._write_json("run_summary.json", self._summary)
         self._write_chip_review(attachment_decisions or [])
         logging.info(f"Run log pack written to {self.run_dir}")
@@ -288,9 +320,12 @@ class RunLogger:
         lines.append(f"  extracted_with_kpis: {s.get('extracted_count', 0)}")
         lines.append(f"  appended:            {s.get('appended_count', 0)}")
         lines.append(f"  skipped_no_kpi:      {s.get('skipped_no_kpi', 0)}")
+        lines.append(f"  quarantined:         {s.get('quarantined_count', 0)}")
+        lines.append(f"  kpi_validation_rej:  {s.get('kpi_validation_rejects', 0)}")
         lines.append(f"  failed:              {s.get('failed_count', 0)}")
         lines.append(f"  append_ok:           {ok_appends}")
         lines.append(f"  append_failed:       {fail_appends}")
+        lines.append(f"  source_rules:        {args.get('source_rules', 0)}")
         lines.append("")
 
         # ================================================================
@@ -336,6 +371,10 @@ class RunLogger:
                 lines.append(f"       Source: {src}" + (f" | File: {att}" if att else ""))
                 lines.append(f"       Evidence: {proof}")
                 lines.append(f"       Confidence: {conf_label} ({conf:.2f})")
+                rule_id = row.get("source_rule_id", "")
+                match_sc = row.get("source_match_score", 0)
+                if rule_id:
+                    lines.append(f"       Source Rule: {rule_id} (match={match_sc:.3f})")
                 lines.append(f"       Trace: {trace}")
                 lines.append("")
 
@@ -353,6 +392,22 @@ class RunLogger:
         lines.append("  WHY THINGS WERE SKIPPED")
         lines.append("-" * 50)
         lines.append("")
+
+        # 4a) Quarantined (unknown source)
+        if self._quarantined:
+            lines.append(f"  --- QUARANTINED ({len(self._quarantined)} emails, no source rule matched) ---")
+            lines.append("")
+            for i, q in enumerate(self._quarantined[:10], 1):
+                lines.append(f"  [Q{i}] {q.get('sender_email', '')}")
+                lines.append(f"       Subject: {q.get('subject', '')[:60]}")
+                lines.append(f"       Reason: {q.get('reason', 'unknown source')}")
+                lines.append(f"       Top rule scores: {q.get('top_scores', '[]')}")
+                lines.append("")
+            if len(self._quarantined) > 10:
+                lines.append(f"  ... {len(self._quarantined) - 10} more — see quarantined.csv")
+                lines.append("")
+
+        # 4b) Skipped candidates
         skipped = self._skipped_candidates[:15]
         if skipped:
             for i, c in enumerate(skipped, 1):

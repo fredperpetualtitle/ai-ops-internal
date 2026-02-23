@@ -1,0 +1,464 @@
+# =============================================================================
+# Source Mapping Configuration
+# =============================================================================
+# Each rule maps a known email source → report type → parser → expected KPIs.
+# The matching engine scores every rule against each email and selects the
+# highest-scoring rule above threshold.  Emails with no matching rule are
+# quarantined (not blindly parsed).
+#
+# Schema version is checked at load time.
+# =============================================================================
+
+schema_version: 1
+
+defaults:
+  global_reject_threshold: 0.45       # rule match score below this → no match
+  global_min_parse_confidence: 0.60   # extracted KPI confidence below this → reject row
+  unknown_source_policy: quarantine   # quarantine | skip | light_parse
+
+# =============================================================================
+# Source Rules
+# =============================================================================
+sources:
+
+  # ---------------------------------------------------------------------------
+  # Perpetual Title — Weekly / Daily Cash & Production Reports
+  # ---------------------------------------------------------------------------
+  - id: perpetual_title_cash_report
+    enabled: true
+    priority: 10
+    report_type: bank_balance
+    entity: Perpetual Title
+
+    match:
+      from_addresses:
+        - morgan@perpetualtitle.com
+        - karen@perpetualtitle.com
+        - beau@perpetualtitle.com
+      from_domains:
+        - perpetualtitle.com
+      subject_regex: "cash|bank|balance|daily.*report"
+      body_contains:
+        - cash balance
+        - bank balance
+        - ending balance
+
+    attachments:
+      - role: primary
+        required: false
+        allowed_mime_types:
+          - application/vnd.openxmlformats-officedocument.spreadsheetml.sheet
+          - application/vnd.ms-excel
+          - application/pdf
+        filename_regex: "cash|balance|daily|report"
+
+    parsing:
+      strategy: attachment_primary
+      parser_type: excel_table
+      parser_hints:
+        preferred_sheets:
+          - Summary
+          - Dashboard
+          - Cash
+          - Balance
+
+    expected_kpis:
+      - kpi_key: cash
+        required: true
+        value_type: currency
+        source_label:
+          - Cash Balance
+          - Bank Balance
+          - Ending Balance
+          - Current Balance
+      - kpi_key: revenue
+        required: false
+        value_type: currency
+        source_label:
+          - Revenue
+          - Total Revenue
+
+    confidence:
+      confidence_weight: 1.0
+      match_threshold: 0.60
+
+    fallback_strategy:
+      on_no_match: quarantine
+      on_parse_error: quarantine
+
+  # ---------------------------------------------------------------------------
+  # Perpetual Title — Title Production Report
+  # ---------------------------------------------------------------------------
+  - id: perpetual_title_production
+    enabled: true
+    priority: 9
+    report_type: title_production
+    entity: Perpetual Title
+
+    match:
+      from_addresses:
+        - morgan@perpetualtitle.com
+        - john@perpetualtitle.com
+        - beau@perpetualtitle.com
+      from_domains:
+        - perpetualtitle.com
+      subject_regex: "production|closings|orders|pipeline|weekly.*report|monthly.*report"
+      body_contains:
+        - closings
+        - orders
+        - pipeline
+        - production
+
+    attachments:
+      - role: primary
+        required: false
+        allowed_mime_types:
+          - application/vnd.openxmlformats-officedocument.spreadsheetml.sheet
+          - application/vnd.ms-excel
+          - application/pdf
+        filename_regex: "production|pipeline|closings|orders|report"
+
+    parsing:
+      strategy: attachment_primary
+      parser_type: excel_table
+      parser_hints:
+        preferred_sheets:
+          - Summary
+          - Production
+          - Pipeline
+          - Report
+
+    expected_kpis:
+      - kpi_key: closings_count
+        required: true
+        value_type: integer
+        source_label:
+          - Closings
+          - Closed
+          - Files Closed
+      - kpi_key: orders_count
+        required: false
+        value_type: integer
+        source_label:
+          - Orders
+          - New Orders
+          - Open Orders
+      - kpi_key: pipeline_value
+        required: false
+        value_type: currency
+        source_label:
+          - Pipeline
+          - Pipeline Value
+          - In Contract
+      - kpi_key: revenue
+        required: false
+        value_type: currency
+        source_label:
+          - Revenue
+          - Total Revenue
+
+    confidence:
+      confidence_weight: 1.0
+      match_threshold: 0.55
+
+    fallback_strategy:
+      on_no_match: quarantine
+      on_parse_error: quarantine
+
+  # ---------------------------------------------------------------------------
+  # Triple Crown Senior Living — Occupancy / Census Report
+  # ---------------------------------------------------------------------------
+  - id: triple_crown_census
+    enabled: true
+    priority: 10
+    report_type: occupancy_census
+    entity: Triple Crown Senior Living
+
+    match:
+      from_addresses:
+        - todd@triplecrownsl.com
+        - matt@triplecrownsl.com
+        - bryan@triplecrownsl.com
+        - mbowman@triplecrownsl.com
+      from_domains:
+        - triplecrownsl.com
+      subject_regex: "census|occupancy|snapshot|daily|weekly|report"
+      body_contains:
+        - occupancy
+        - census
+        - occupied
+        - bed
+
+    attachments:
+      - role: primary
+        required: false
+        allowed_mime_types:
+          - application/vnd.openxmlformats-officedocument.spreadsheetml.sheet
+          - application/vnd.ms-excel
+          - application/pdf
+          - text/csv
+        filename_regex: "census|occupancy|snapshot|daily|report"
+
+    parsing:
+      strategy: attachment_primary
+      parser_type: excel_table
+      parser_hints:
+        preferred_sheets:
+          - Census
+          - Summary
+          - Dashboard
+          - Occupancy
+
+    expected_kpis:
+      - kpi_key: occupancy
+        required: true
+        value_type: percent
+        source_label:
+          - Occupancy
+          - Census
+          - Occupied
+          - Occupancy Rate
+      - kpi_key: revenue
+        required: false
+        value_type: currency
+        source_label:
+          - Revenue
+          - Total Revenue
+
+    confidence:
+      confidence_weight: 1.0
+      match_threshold: 0.55
+
+    fallback_strategy:
+      on_no_match: quarantine
+      on_parse_error: quarantine
+
+  # ---------------------------------------------------------------------------
+  # Direct GP Investments — Financial / Accounting Export
+  # ---------------------------------------------------------------------------
+  - id: direct_gp_accounting
+    enabled: true
+    priority: 8
+    report_type: accounting_export
+    entity: Direct GP Investments
+
+    match:
+      from_addresses:
+        - ashley@dentonfloyd.com
+        - seth@dentonfloyd.com
+        - joey@dentonfloyd.com
+        - zstrecker@dentonfloyd.com
+      from_domains:
+        - dentonfloyd.com
+      subject_regex: "financial|accounting|report|summary|p&l|balance|revenue"
+      body_contains:
+        - revenue
+        - cash
+        - financial
+        - balance
+
+    attachments:
+      - role: primary
+        required: false
+        allowed_mime_types:
+          - application/vnd.openxmlformats-officedocument.spreadsheetml.sheet
+          - application/vnd.ms-excel
+          - application/pdf
+          - text/csv
+        filename_regex: "financial|accounting|report|p.l|balance|revenue"
+
+    parsing:
+      strategy: attachment_primary
+      parser_type: excel_table
+
+    expected_kpis:
+      - kpi_key: revenue
+        required: false
+        value_type: currency
+        source_label:
+          - Revenue
+          - Total Revenue
+          - Gross Revenue
+      - kpi_key: cash
+        required: false
+        value_type: currency
+        source_label:
+          - Cash
+          - Cash Balance
+          - Bank Balance
+
+    confidence:
+      confidence_weight: 1.0
+      match_threshold: 0.50
+
+    fallback_strategy:
+      on_no_match: quarantine
+      on_parse_error: quarantine
+
+  # ---------------------------------------------------------------------------
+  # Plowshares Capital — Financial / Pipeline Reports
+  # ---------------------------------------------------------------------------
+  - id: plowshares_financial
+    enabled: true
+    priority: 8
+    report_type: accounting_export
+    entity: Plowshares Capital
+
+    match:
+      from_addresses:
+        - meaghan@dmlo.com
+        - robb@channelmarkeradvisors.com
+      from_domains:
+        - dmlo.com
+        - channelmarkeradvisors.com
+        - plowsharescapital.com
+      subject_regex: "financial|report|summary|cash|pipeline|revenue"
+      body_contains:
+        - revenue
+        - cash
+        - pipeline
+        - financial
+
+    attachments:
+      - role: primary
+        required: false
+        allowed_mime_types:
+          - application/vnd.openxmlformats-officedocument.spreadsheetml.sheet
+          - application/vnd.ms-excel
+          - application/pdf
+        filename_regex: "financial|report|summary|revenue|cash"
+
+    parsing:
+      strategy: attachment_primary
+      parser_type: excel_table
+
+    expected_kpis:
+      - kpi_key: revenue
+        required: false
+        value_type: currency
+        source_label:
+          - Revenue
+          - Total Revenue
+      - kpi_key: cash
+        required: false
+        value_type: currency
+        source_label:
+          - Cash
+          - Cash Balance
+
+    confidence:
+      confidence_weight: 1.0
+      match_threshold: 0.50
+
+    fallback_strategy:
+      on_no_match: quarantine
+      on_parse_error: quarantine
+
+  # ---------------------------------------------------------------------------
+  # Louisville Low Voltage — Financial / Pipeline
+  # ---------------------------------------------------------------------------
+  - id: louisville_low_voltage_report
+    enabled: true
+    priority: 7
+    report_type: accounting_export
+    entity: Louisville Low Voltage
+
+    match:
+      from_addresses:
+        - nick@louisvillelowvoltage.com
+        - molly@louisvillelowvoltage.com
+      from_domains:
+        - louisvillelowvoltage.com
+      subject_regex: "report|financial|pipeline|revenue|summary"
+      body_contains:
+        - revenue
+        - pipeline
+        - cash
+
+    attachments:
+      - role: primary
+        required: false
+        allowed_mime_types:
+          - application/vnd.openxmlformats-officedocument.spreadsheetml.sheet
+          - application/vnd.ms-excel
+          - application/pdf
+        filename_regex: "report|financial|pipeline|revenue"
+
+    parsing:
+      strategy: attachment_primary
+      parser_type: excel_table
+
+    expected_kpis:
+      - kpi_key: revenue
+        required: false
+        value_type: currency
+        source_label:
+          - Revenue
+          - Total Revenue
+      - kpi_key: pipeline_value
+        required: false
+        value_type: currency
+        source_label:
+          - Pipeline
+          - Pipeline Value
+
+    confidence:
+      confidence_weight: 1.0
+      match_threshold: 0.50
+
+    fallback_strategy:
+      on_no_match: quarantine
+      on_parse_error: quarantine
+
+  # ---------------------------------------------------------------------------
+  # FMD Legal (Direct GP counsel) — legal / financial docs
+  # ---------------------------------------------------------------------------
+  - id: fmd_legal_report
+    enabled: true
+    priority: 6
+    report_type: accounting_export
+    entity: Direct GP Investments
+
+    match:
+      from_addresses:
+        - jhamilton@fmdlegal.com
+      from_domains:
+        - fmdlegal.com
+      subject_regex: "report|financial|closing|settlement"
+      body_contains:
+        - closing
+        - settlement
+        - financial
+
+    attachments:
+      - role: primary
+        required: false
+        allowed_mime_types:
+          - application/pdf
+          - application/vnd.openxmlformats-officedocument.spreadsheetml.sheet
+        filename_regex: "report|closing|settlement|financial"
+
+    parsing:
+      strategy: attachment_primary
+      parser_type: pdf_table
+
+    expected_kpis:
+      - kpi_key: revenue
+        required: false
+        value_type: currency
+        source_label:
+          - Revenue
+      - kpi_key: cash
+        required: false
+        value_type: currency
+        source_label:
+          - Cash
+          - Balance
+
+    confidence:
+      confidence_weight: 0.8
+      match_threshold: 0.50
+
+    fallback_strategy:
+      on_no_match: quarantine
+      on_parse_error: quarantine

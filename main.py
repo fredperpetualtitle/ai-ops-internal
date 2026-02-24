@@ -15,6 +15,8 @@ from ai_ops.src.services.run_report_renderer import render_run_report_md
 from ai_ops.src.services.operator_brief_generator import generate_operator_brief_markdown
 from ai_ops.src.services.deal_risk_renderer import render_deal_risk_memo_md
 from ai_ops.src.services.accountability_renderer import render_accountability_report_md
+from ai_ops.src.services.weekly_metrics_normalizer import wide_to_long
+from ai_ops.src.services.weekly_trend_detector import WeeklyTrendDetector
 import json
 import os
 from datetime import date, datetime
@@ -151,6 +153,47 @@ def main() -> None:
                     # fallback: list indexes
                     for idx, row in tasks[tasks['is_overdue']].iterrows():
                         print(f"- Task row: {idx}")
+
+            # ── Weekly Metrics: wide→long + trend detection ──────────────
+            weekly_trend_result = None
+            try:
+                from ai_ops.src.services.sheet_normalizer import _normalize_col_name
+                # Find the weekly tab in raw_sheets
+                weekly_df = None
+                for sname, sdf in nw.raw_sheets.items():
+                    simplified = sname.lower().replace(' ', '_').replace('-', '_')
+                    if 'weekly' in simplified and ('metric' in simplified or 'trend' in simplified):
+                        weekly_df = sdf
+                        log.info("Found weekly wide-format tab: '%s'", sname)
+                        break
+
+                if weekly_df is not None and not weekly_df.empty:
+                    long_df = wide_to_long(weekly_df)
+                    if not long_df.empty:
+                        detector = WeeklyTrendDetector()
+                        weekly_trend_result = detector.detect(long_df)
+                        log.info(
+                            "Weekly trend detection complete: W1=%s W0=%s signals=%d risks=%d",
+                            weekly_trend_result.w1_key,
+                            weekly_trend_result.w0_key,
+                            len(weekly_trend_result.signals),
+                            len(weekly_trend_result.risks),
+                        )
+                        print(f"\nWEEKLY TREND: {weekly_trend_result.w1_key} vs {weekly_trend_result.w0_key}")
+                        for sig in weekly_trend_result.signals:
+                            if sig.status == 'OK' and sig.direction != 'FLAT':
+                                print(f"  {sig.entity}/{sig.kpi}: {sig.direction} {sig.delta_pct*100:+.1f}% ({sig.strength}) [{sig.momentum}]")
+                        if weekly_trend_result.risks:
+                            print("  Risks:")
+                            for r in weekly_trend_result.risks:
+                                print(f"    - {r}")
+                    else:
+                        log.info("Weekly long-format conversion produced 0 rows — skipping trend detection")
+                else:
+                    log.info("No weekly_metrics tab found in raw_sheets — skipping trend detection")
+            except Exception as e:
+                log.warning("Weekly trend detection failed (non-fatal): %s", e)
+                log.debug("Weekly trend exception details", exc_info=True)
 
             # Deals requiring attention
             if not deals.empty and ('dd_overdue' in deals.columns or 'dd_due_soon' in deals.columns):
@@ -369,7 +412,10 @@ def main() -> None:
                     )
 
                     # Generate deterministic operator brief from RunReport
-                    operator_md, operator_err = generate_operator_brief_markdown(run_report)
+                    operator_md, operator_err = generate_operator_brief_markdown(
+                        run_report,
+                        weekly_trend_result=weekly_trend_result,
+                    )
                     brief_write_paths = [str(latest_path), str(dated_path)]
                     if operator_err:
                         llm_error = operator_err

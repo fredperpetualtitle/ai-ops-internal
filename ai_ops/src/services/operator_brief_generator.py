@@ -1,14 +1,103 @@
 """Generate AI Operator Mode executive brief using deterministic signals.
 
-Produces Markdown when LLM is enabled. Uses only signals + reasoning_trace.
+Produces Markdown. Uses only signals + reasoning_trace.
+No LLM dependency — fully deterministic.
 """
-from typing import Dict, Any, Optional
+from typing import Dict, Any, List, Optional
 from ai_ops.src.core.run_report import RunReport
+from ai_ops.src.services.weekly_trend_detector import WeeklyTrendResult, TrendSignal
 
 
 # Deterministic operator brief generator.
 # This converts the deterministic signals stored in RunReport into a
 # concise, operator-focused one-page markdown brief (no LLM dependency).
+
+
+# ---------------------------------------------------------------------------
+# Formatting helpers
+# ---------------------------------------------------------------------------
+
+def _fmt_amount(x: float) -> str:
+    """Human-friendly number formatter (e.g. 1.2M, 350K, 42)."""
+    try:
+        v = float(x)
+    except Exception:
+        return str(x)
+    if abs(v) >= 1_000_000:
+        return f"{v / 1_000_000:.1f}M"
+    if abs(v) >= 1_000:
+        return f"{v / 1_000:.0f}K"
+    if v == int(v):
+        return f"{int(v)}"
+    return f"{v:.2f}"
+
+
+# ---------------------------------------------------------------------------
+# Weekly Trend Section renderer
+# ---------------------------------------------------------------------------
+
+def _render_weekly_trend_section(result: Optional[WeeklyTrendResult]) -> List[str]:
+    """Render the 'Weekly Trend Signals' section as a list of markdown lines.
+
+    Returns an empty list (no section at all) when *result* is None or empty.
+    """
+    if result is None:
+        return []
+
+    ok_signals = [s for s in result.signals if s.status == "OK"]
+    if not ok_signals and not result.risks:
+        return [
+            "Weekly Trend Signals (This Week vs Last Week)",
+            f"- Comparing {result.w1_key} vs {result.w0_key}",
+            "- No sufficient data for trend analysis",
+            "",
+        ]
+
+    lines: List[str] = []
+    lines.append("Weekly Trend Signals (This Week vs Last Week)")
+    lines.append(f"Period: {result.w0_key} → {result.w1_key}")
+    lines.append("")
+
+    # Group signals by entity, show top movements
+    by_entity: Dict[str, List[TrendSignal]] = {}
+    for sig in ok_signals:
+        by_entity.setdefault(sig.entity, []).append(sig)
+
+    for entity in sorted(by_entity):
+        sigs = by_entity[entity]
+        # Sort by absolute pct change descending, take top 3
+        sigs_sorted = sorted(sigs, key=lambda s: abs(s.delta_pct), reverse=True)
+        non_flat = [s for s in sigs_sorted if s.direction != "FLAT"]
+        top = non_flat[:3] if non_flat else sigs_sorted[:1]
+
+        lines.append(f"  {entity}:")
+        for sig in top:
+            arrow = "▲" if sig.direction == "UP" else ("▼" if sig.direction == "DOWN" else "—")
+            pct_str = f"{sig.delta_pct * 100:+.1f}%"
+            val_str = f"{_fmt_amount(sig.value_w0)} → {_fmt_amount(sig.value_w1)}"
+            momentum_str = f" [{sig.momentum}]" if sig.momentum not in ("NA", "STABLE") else ""
+            strength_tag = f" ({sig.strength})" if sig.strength != "WEAK" else ""
+            lines.append(
+                f"  - {sig.kpi.upper()} {arrow} {pct_str}{strength_tag} "
+                f"({val_str}){momentum_str}"
+            )
+        lines.append("")
+
+    # Insufficient data signals summary
+    insuff = [s for s in result.signals if s.status == "INSUFFICIENT_DATA"]
+    if insuff:
+        entities_with_gaps = sorted({s.entity for s in insuff})
+        lines.append(f"  Insufficient data: {', '.join(entities_with_gaps)}")
+        lines.append("")
+
+    # Risks / Flags subsection
+    if result.risks:
+        lines.append("  Risks / Flags:")
+        for risk in result.risks:
+            lines.append(f"  - {risk}")
+        lines.append("")
+
+    return lines
 
 
 def _build_user_payload(run_report: RunReport) -> Dict[str, Any]:
@@ -26,8 +115,19 @@ def _build_user_payload(run_report: RunReport) -> Dict[str, Any]:
     }
 
 
-def generate_operator_brief_markdown(run_report: RunReport) -> tuple[Optional[str], Optional[str]]:
+def generate_operator_brief_markdown(
+    run_report: RunReport,
+    weekly_trend_result: Optional[WeeklyTrendResult] = None,
+) -> tuple[Optional[str], Optional[str]]:
     """Deterministically render an executive brief from `RunReport`.
+
+    Parameters
+    ----------
+    run_report : RunReport
+        Core deterministic signals from the run.
+    weekly_trend_result : WeeklyTrendResult, optional
+        Output of the WeeklyTrendDetector. When provided, a
+        "Weekly Trend Signals" section is appended to the brief.
 
     Returns (markdown, None) on success or (None, error_message) on failure.
     """
@@ -59,6 +159,9 @@ def generate_operator_brief_markdown(run_report: RunReport) -> tuple[Optional[st
         else:
             lines.append("- No immediate trend issues detected")
         lines.append("")
+
+        # ── Weekly Trend Signals (This Week vs Last Week) ──────────────
+        lines.extend(_render_weekly_trend_section(weekly_trend_result))
 
         # Cash / Capital
         lines.append("Cash / Capital")
@@ -121,8 +224,8 @@ def generate_operator_brief_markdown(run_report: RunReport) -> tuple[Optional[st
 
         # Join and enforce short output
         md = "\n".join(lines)
-        # Limit roughly to one page (simple heuristic): truncate if too long
-        max_lines = 80
+        # Limit roughly to two pages (simple heuristic): truncate if too long
+        max_lines = 120
         md_lines = md.splitlines()
         if len(md_lines) > max_lines:
             md = "\n".join(md_lines[:max_lines]) + "\n\n*Truncated: brief exceeds one page*"

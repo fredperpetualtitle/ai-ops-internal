@@ -40,6 +40,7 @@ from outlook_kpi_scraper.source_matcher import (
 from outlook_kpi_scraper.writers.google_sheets_writer import GoogleSheetsWriter
 from outlook_kpi_scraper.writers.csv_writer import CSVWriter
 from outlook_kpi_scraper.utils import load_env
+from outlook_kpi_scraper.quarantine_triage import triage_quarantined_emails, triage_available
 
 log = logging.getLogger(__name__)
 
@@ -237,6 +238,75 @@ def _debug_attachment(file_path: str):
     print(f"\n  Text preview (first 500 chars):")
     print(f"  {text[:500]}")
     print(f"\n{'='*60}")
+
+
+def _write_llm_candidates(run_dir, extracted_rows, quarantined):
+    """Write llm_candidates.csv listing docs for LLM enrichment and quarantined emails for triage.
+
+    Two sections:
+      category=tier1_extraction / tier2_extraction — matched emails with Tier 1/2
+          attachments whose KPIs should be enriched by GPT-4o.
+      category=quarantine_triage — unmatched emails that need lightweight
+          LLM classification.
+    """
+    import csv
+    import re as _re
+    out_path = os.path.join(run_dir, "llm_candidates.csv")
+    rows = []
+
+    # 1) Tier 1/2 from extracted rows (parse tier from evidence)
+    for _eid, kpi_row in extracted_rows:
+        ev = kpi_row.get("evidence_source", "") or ""
+        tier_m = _re.search(r"tier=(\d+)", ev)
+        tier = int(tier_m.group(1)) if tier_m else 4
+        if tier <= 2:
+            rows.append({
+                "category": f"tier{tier}_extraction",
+                "sender": kpi_row.get("sender", ""),
+                "subject": kpi_row.get("subject", ""),
+                "entity": kpi_row.get("entity", ""),
+                "tier": tier,
+                "source_rule": kpi_row.get("source_rule_id", ""),
+                "kpis_found": ";".join(
+                    f for f in ("revenue", "cash", "pipeline_value",
+                                "closings_count", "orders_count", "occupancy")
+                    if kpi_row.get(f) is not None
+                ),
+                "llm_ran": "LLM:" in ev,
+                "evidence_snippet": ev[:200],
+            })
+
+    # 2) Quarantined emails for triage
+    for msg in quarantined:
+        rows.append({
+            "category": "quarantine_triage",
+            "sender": msg.get("sender_email", ""),
+            "subject": msg.get("subject", ""),
+            "entity": "",
+            "tier": "",
+            "source_rule": "",
+            "kpis_found": "",
+            "llm_ran": False,
+            "evidence_snippet": f"score={msg.get('candidate_score', 0)} "
+                                f"reasons={msg.get('candidate_reason', [])}",
+        })
+
+    if not rows:
+        return
+
+    fieldnames = ["category", "sender", "subject", "entity", "tier",
+                  "source_rule", "kpis_found", "llm_ran", "evidence_snippet"]
+    try:
+        with open(out_path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(rows)
+        log.info("Wrote %d LLM candidates to %s (tier1/2: %d, quarantine: %d)",
+                 len(rows), out_path,
+                 sum(1 for r in rows if r["category"] != "quarantine_triage"),
+                 sum(1 for r in rows if r["category"] == "quarantine_triage"))
+    except Exception as exc:
+        log.warning("Failed to write llm_candidates.csv: %s", exc)
 
 
 def main():
@@ -494,6 +564,22 @@ def main():
              len(extracted_rows), skipped_no_kpi, skipped_quarantine,
              skipped_kpi_validation, len(failed_extractions))
 
+    # ---- Write LLM candidates manifest ----
+    # Captures Tier 1/2 docs (for enrichment) + quarantined emails (for triage)
+    _write_llm_candidates(run_logger.run_dir, extracted_rows, quarantined)
+
+    # ---- Quarantine triage (GPT-4o-mini classification) ----
+    triage_summary = {}
+    if quarantined and triage_available():
+        log.info("Starting quarantine triage on %d emails...", len(quarantined))
+        triage_summary = triage_quarantined_emails(
+            quarantined, run_logger.run_dir,
+        )
+        log.info("Triage summary: %s", triage_summary)
+    elif quarantined:
+        log.info("Quarantine triage skipped (LLM not available). "
+                 "%d emails written to quarantined.csv only.", len(quarantined))
+
     # ---- Write to Google Sheets (batched) ----
     writer = None
     if env.get("GOOGLE_SHEET_ID") and env.get("GOOGLE_SERVICE_ACCOUNT_JSON_PATH"):
@@ -544,6 +630,7 @@ def main():
             "require_kpi": args.require_kpi,
             "batch_size": args.batch_size,
             "source_rules": source_rules_count,
+            "triage_summary": triage_summary,
         },
     )
 
@@ -561,6 +648,11 @@ def main():
           f"failed={failed_count}  skipped_no_kpi={skipped_no_kpi}  "
           f"quarantined={skipped_quarantine}  kpi_rejects={skipped_kpi_validation}  "
           f"duration={duration:.1f}s")
+    if triage_summary and triage_summary.get("classified", 0) > 0:
+        print(f"\n  TRIAGE: classified={triage_summary['classified']}  "
+              f"financial_hits={triage_summary.get('financial_count', 0)}  "
+              f"by_label={triage_summary.get('by_label', {})}  "
+              f"cost=~${triage_summary.get('cost_estimate_usd', 0):.4f}")
     print(f"\n  CHIP REVIEW:  {chip_review_path}")
     print(f"  Run log pack: {os.path.abspath(run_logger.run_dir)}")
     print(f"{'='*60}")

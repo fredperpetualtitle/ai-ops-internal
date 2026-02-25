@@ -279,12 +279,14 @@ def extract_kpis_from_attachments(
     # by parsing the evidence strings already recorded during parsing.
     best_tier = 4
     for ev in evidence:
-        m = re.search(r"suitability \S+ tier=(\d+)", ev)
+        m = re.search(r"suitability .+? tier=(\d+)", ev)
         if m:
             best_tier = min(best_tier, int(m.group(1)))
 
     kpi_count = sum(1 for f in KPI_SYNONYMS if kpi.get(f) is not None)
     should_llm = (best_tier == 1) or (best_tier == 2 and kpi_count <= 1)
+    log.debug("LLM gate: best_tier=%d kpi_count=%d should_llm=%s llm_avail=%s",
+              best_tier, kpi_count, should_llm, llm_available())
 
     if should_llm and llm_available():
         log.info("LLM trigger: best_tier=%d kpi_count=%d – invoking GPT-4o",

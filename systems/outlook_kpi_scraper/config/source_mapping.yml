@@ -234,6 +234,87 @@ sources:
       on_parse_error: quarantine
 
   # ---------------------------------------------------------------------------
+  # Triple Crown Senior Living — Financial / Budget Reports
+  # ---------------------------------------------------------------------------
+  - id: triple_crown_financials
+    enabled: true
+    priority: 8
+    report_type: accounting_export
+    entity: Triple Crown Senior Living
+
+    match:
+      from_addresses:
+        - jthompson@triplecrownsl.com
+        - tmarsh@triplecrownsl.com
+        - bculliton@triplecrownsl.com
+        - todd@triplecrownsl.com
+        - matt@triplecrownsl.com
+        - bryan@triplecrownsl.com
+        - mbowman@triplecrownsl.com
+      from_domains:
+        - triplecrownsl.com
+      subject_regex: "budget|financial|model|deck|yield|analysis|stepped|p&l|balance.sheet|income.statement"
+      body_contains:
+        - budget
+        - financial
+        - revenue
+        - yield
+        - model
+        - income
+
+    attachments:
+      - role: primary
+        required: false
+        allowed_mime_types:
+          - application/vnd.openxmlformats-officedocument.spreadsheetml.sheet
+          - application/vnd.ms-excel
+          - application/pdf
+          - application/vnd.openxmlformats-officedocument.presentationml.presentation
+        filename_regex: "budget|financial|model|deck|yield|analysis|stepped|p.l"
+
+    parsing:
+      strategy: attachment_primary
+      parser_type: excel_table
+      parser_hints:
+        preferred_sheets:
+          - Summary
+          - Budget
+          - P&L
+          - Income
+          - Dashboard
+
+    expected_kpis:
+      - kpi_key: revenue
+        required: false
+        value_type: currency
+        source_label:
+          - Revenue
+          - Total Revenue
+          - Gross Revenue
+          - Net Revenue
+      - kpi_key: cash
+        required: false
+        value_type: currency
+        source_label:
+          - Cash
+          - Cash Balance
+          - Cash on Hand
+      - kpi_key: occupancy
+        required: false
+        value_type: percent
+        source_label:
+          - Occupancy
+          - Occupancy Rate
+
+    confidence:
+      confidence_weight: 1.0
+      match_threshold: 0.50
+
+    fallback_strategy:
+      on_no_match: quarantine
+      on_parse_error: quarantine
+
+  # ---------------------------------------------------------------------------
   # Direct GP Investments — Financial / Accounting Export
   # ---------------------------------------------------------------------------
   - id: direct_gp_accounting
@@ -248,6 +329,7 @@ sources:
         - seth@dentonfloyd.com
         - joey@dentonfloyd.com
         - zstrecker@dentonfloyd.com
+        - aherron@dentonfloyd.com
       from_domains:
         - dentonfloyd.com
       subject_regex: "financial|accounting|report|summary|p&l|balance|revenue"

@@ -40,14 +40,34 @@ AGGREGATED_TOTALS_TERMS = [
 # ------------------------------------------------------------------
 # Hard-reject keywords (Tier 4)
 # ------------------------------------------------------------------
-REJECT_KEYWORDS = [
-    "pro forma", "proforma", "irr", "waterfall", "offering",
+# Multi-word phrases: safe as plain substring matches.
+REJECT_KEYWORDS_SUBSTRING = [
+    "pro forma", "proforma", "waterfall",
     "equity raise", "capex budget", "replacement cost",
     "investment memorandum", "loan document", "change order",
-    "tax bill", "hr agreement", "nda", "agenda",
+    "tax bill", "hr agreement",
     "purchase and sale agreement", "operations transfer agreement",
     "designation notice",
 ]
+# Short words that cause false positives as substrings
+# ("nda" matched Monday/calendar, "irr" matched irregular).
+# Matched with word-boundary regex instead.
+REJECT_KEYWORDS_WORD_BOUNDARY = ["nda", "irr"]
+_REJECT_WB_RE = re.compile(
+    r"\b(?:" + "|".join(re.escape(k) for k in REJECT_KEYWORDS_WORD_BOUNDARY) + r")\b",
+    re.IGNORECASE,
+)
+
+# ------------------------------------------------------------------
+# Penalty keywords (score -= 2, but NOT instant Tier 4)
+# These appear in legitimate KPI docs (meeting agendas with
+# occupancy data, offering summaries with revenue figures).
+# ------------------------------------------------------------------
+PENALTY_KEYWORDS = ["agenda", "offering"]
+_PENALTY_RE = re.compile(
+    r"\b(?:" + "|".join(re.escape(k) for k in PENALTY_KEYWORDS) + r")\b",
+    re.IGNORECASE,
+)
 
 # ------------------------------------------------------------------
 # Excel sheet-name signals
@@ -202,10 +222,23 @@ def compute_suitability(
     text_lower = text.lower()
     filename_lower = filename.lower()
 
-    # ---- Hard reject keywords ----
-    for kw in REJECT_KEYWORDS:
+    # ---- Hard reject keywords (substring) ----
+    for kw in REJECT_KEYWORDS_SUBSTRING:
         if kw in text_lower:
             reject_hits.append(kw)
+
+    # ---- Hard reject keywords (word-boundary) ----
+    for m in _REJECT_WB_RE.finditer(text_lower):
+        matched_kw = m.group().lower()
+        if matched_kw not in reject_hits:
+            reject_hits.append(matched_kw)
+
+    # ---- Penalty keywords (score deduction, not hard-reject) ----
+    penalty_hits: list[str] = []
+    for m in _PENALTY_RE.finditer(text_lower):
+        matched_kw = m.group().lower()
+        if matched_kw not in penalty_hits:
+            penalty_hits.append(matched_kw)
 
     # ---- Excel sheet-name signals ----
     if sheetnames:
@@ -251,6 +284,11 @@ def compute_suitability(
     if _mtd_snapshot_heuristic(text_lower):
         score += 2
         reasons.append("+2 MTD snapshot heuristic (time term + >=2 KPI labels)")
+
+    # ---- Apply penalty keyword deductions ----
+    if penalty_hits:
+        score -= 2
+        reasons.append(f"-2 penalty keywords: {', '.join(penalty_hits)}")
 
     # ---- Determine tier ----
     used_ocr_candidate = False

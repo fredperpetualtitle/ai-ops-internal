@@ -6,6 +6,45 @@ from datetime import datetime, timedelta
 log = logging.getLogger(__name__)
 
 
+def _resolve_smtp_address(item) -> str | None:
+    """Try to resolve Exchange DN sender addresses to a real SMTP address.
+
+    Exchange stores internal senders as DN strings like:
+      /O=EXCHANGELABS/OU=.../CN=RECIPIENTS/CN=...
+    This uses the Outlook COM object model to resolve to the real SMTP
+    address via Sender.GetExchangeUser().PrimarySmtpAddress.
+    Falls back to PropertyAccessor PR_SMTP_ADDRESS if the first method fails.
+    Returns None if resolution fails.
+    """
+    # Only attempt resolution for Exchange-type senders
+    sender_type = getattr(item, "SenderEmailType", None)
+    if sender_type != "EX":
+        return None
+
+    # Method 1: Sender.GetExchangeUser().PrimarySmtpAddress
+    try:
+        sender = item.Sender
+        if sender is not None:
+            exch_user = sender.GetExchangeUser()
+            if exch_user is not None:
+                smtp = exch_user.PrimarySmtpAddress
+                if smtp and "@" in smtp:
+                    return smtp.strip()
+    except Exception as exc:
+        log.debug("GetExchangeUser resolution failed: %s", exc)
+
+    # Method 2: PropertyAccessor with PR_SMTP_ADDRESS
+    PR_SMTP_ADDRESS = "http://schemas.microsoft.com/mapi/proptag/0x39FE001E"
+    try:
+        smtp = item.PropertyAccessor.GetProperty(PR_SMTP_ADDRESS)
+        if smtp and "@" in str(smtp):
+            return str(smtp).strip()
+    except Exception as exc:
+        log.debug("PropertyAccessor SMTP resolution failed: %s", exc)
+
+    return None
+
+
 class OutlookReader:
     def __init__(self, mailbox, folder, days, max_items):
         self.mailbox = mailbox
@@ -77,10 +116,17 @@ class OutlookReader:
                     has_kpi_attachment = any(a["ext"] in kpi_exts for a in att_meta)
 
                     entry_id = getattr(item, 'EntryID', None)
+                    raw_sender_email = getattr(item, 'SenderEmailAddress', None)
+                    # Resolve Exchange DN to real SMTP address
+                    resolved_smtp = _resolve_smtp_address(item)
+                    if resolved_smtp:
+                        log.debug("Resolved Exchange DN to SMTP: %s → %s",
+                                  (raw_sender_email or "")[:60], resolved_smtp)
+                    sender_email = resolved_smtp or raw_sender_email
                     msg = {
                         'subject': subj,
                         'sender_name': getattr(item, 'SenderName', None),
-                        'sender_email': getattr(item, 'SenderEmailAddress', None),
+                        'sender_email': sender_email,
                         'received_dt': received.strftime('%Y-%m-%dT%H:%M:%S'),
                         'body': getattr(item, 'Body', ''),
                         'entry_id': entry_id,

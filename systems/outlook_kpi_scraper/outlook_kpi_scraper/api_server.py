@@ -332,11 +332,10 @@ async def health():
     sheet_ok = False
 
     try:
-        from outlook_kpi_scraper.email_indexer import _get_collection
+        from outlook_kpi_scraper.email_indexer import _get_collection, CHROMA_DIR
         _, coll = _get_collection(api_key)
         email_count = coll.count()
-        chroma_path = str(getattr(coll, "_client", {
-        }).__dict__.get("_persist_directory", ""))
+        chroma_path = str(CHROMA_DIR)
     except Exception:
         pass
 

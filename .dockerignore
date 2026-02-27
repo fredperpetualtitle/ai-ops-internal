@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.pyc
+.git/
+.env
+*.egg-info/
+data/input/
+data/output/
+notebooks/
+systems/outlook_kpi_scraper/.venv/
+systems/outlook_kpi_scraper/data/chromadb/
+systems/outlook_kpi_scraper/logs/
+systems/outlook_kpi_scraper/secrets/
+*.log

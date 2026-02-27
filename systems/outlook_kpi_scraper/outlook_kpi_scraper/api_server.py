@@ -270,15 +270,21 @@ async def health():
     # Email index
     email_count = 0
     chroma_path = ""
+    kpi_count = 0
+    sheet_ok = False
+
     try:
-        from outlook_kpi_scraper.email_indexer import _get_collection, get_collection_stats
+        from outlook_kpi_scraper.email_indexer import _get_collection
+        _, coll = _get_collection(api_key)
+        email_count = coll.count()
+        chroma_path = str(getattr(coll, "_client", {
+        }).__dict__.get("_persist_directory", ""))
     except Exception:
         pass
 
     try:
         from outlook_kpi_scraper.query_agent import _read_kpi_sheet
         rows = _read_kpi_sheet(env)
-
         kpi_count = len(rows)
         sheet_ok = kpi_count > 0
     except Exception:

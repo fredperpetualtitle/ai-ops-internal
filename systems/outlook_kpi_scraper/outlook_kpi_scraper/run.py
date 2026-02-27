@@ -437,7 +437,11 @@ def main():
         days=args.days, max_items=args.max,
         subfolder_days=args.subfolder_days,
     )
-    messages = reader.fetch_messages()
+    try:
+        messages = reader.fetch_messages()
+    except Exception as exc:
+        log.error("FATAL: fetch_messages crashed: %s", exc)
+        messages = []
     scanned = len(messages)
     log.info("Fetched %d messages from Outlook", scanned)
 

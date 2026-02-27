@@ -53,8 +53,19 @@ def phase1_scan():
     print("  PHASE 1: Pipeline scan (ALL emails, ALL days)")
     print("=" * 65)
 
-    # Dynamically enumerate all folders and subfolders in the mailbox
+    # Dynamically enumerate all folders and subfolders in the mailbox,
+    # skipping non-mail folders that waste time and trigger COM errors.
     import win32com.client
+
+    # Folders that are not mail containers — skip them entirely
+    SKIP_FOLDERS = {
+        "calendar", "contacts", "tasks", "notes", "journal",
+        "rss feeds", "rss subscriptions", "sync issues",
+        "social activity notifications", "quick step settings",
+        "yammer root", "conversation history", "conversation action settings",
+        "externalcontacts", "files", "chip",
+    }
+
     def enumerate_outlook_folders(mailbox_name):
         outlook = win32com.client.Dispatch("Outlook.Application").GetNamespace("MAPI")
         store = None
@@ -69,17 +80,31 @@ def phase1_scan():
             paths = []
             name = folder.Name
             full_path = f"{path_prefix}{name}" if path_prefix else name
+            # Skip non-mail top-level folders
+            top_name = full_path.split("/")[0].lower()
+            if top_name in SKIP_FOLDERS:
+                return paths
             paths.append(full_path)
-            for i in range(1, folder.Folders.Count + 1):
-                sub = folder.Folders.Item(i)
-                paths.extend(recurse(sub, f"{full_path}/"))
+            try:
+                for i in range(1, folder.Folders.Count + 1):
+                    sub = folder.Folders.Item(i)
+                    paths.extend(recurse(sub, f"{full_path}/"))
+            except Exception:
+                pass
             return paths
         all_paths = []
         for i in range(1, store.Folders.Count + 1):
             f = store.Folders.Item(i)
             all_paths.extend(recurse(f))
         return all_paths
+
     all_folders = enumerate_outlook_folders("Chip Ridge")
+    print(f"  Discovered {len(all_folders)} mail folders (non-mail folders skipped)")
+    for f in all_folders[:10]:
+        print(f"    - {f}")
+    if len(all_folders) > 10:
+        print(f"    ... and {len(all_folders) - 10} more")
+
     folders_arg = ",".join(all_folders)
     cmd = [
         str(VENV_PYTHON),

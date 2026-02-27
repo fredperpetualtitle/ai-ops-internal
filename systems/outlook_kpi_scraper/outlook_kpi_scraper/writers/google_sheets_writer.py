@@ -45,7 +45,8 @@ class GoogleSheetsWriter:
     def __init__(self, env, batch_size=DEFAULT_BATCH_SIZE):
         self.sheet_id = env.get("GOOGLE_SHEET_ID")
         self.tab = env.get("GOOGLE_SHEET_TAB", "Daily KPI Snapshot")
-        creds_path = env.get("GOOGLE_SERVICE_ACCOUNT_JSON_PATH")
+        from outlook_kpi_scraper.utils import resolve_google_creds_path
+        creds_path = resolve_google_creds_path(env)
         self.creds = Credentials.from_service_account_file(
             creds_path, scopes=["https://www.googleapis.com/auth/spreadsheets"]
         )

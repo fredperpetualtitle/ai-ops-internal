@@ -57,7 +57,8 @@ def _read_kpi_sheet(env: dict) -> list[dict]:
         log.warning("gspread not installed — KPI sheet unavailable")
         return []
 
-    creds_path = env.get("GOOGLE_SERVICE_ACCOUNT_JSON_PATH")
+    from outlook_kpi_scraper.utils import resolve_google_creds_path
+    creds_path = resolve_google_creds_path(env)
     sheet_id = env.get("GOOGLE_SHEET_ID")
     if not creds_path or not sheet_id:
         log.warning("Google Sheet credentials not configured")

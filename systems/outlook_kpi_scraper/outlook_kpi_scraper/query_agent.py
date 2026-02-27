@@ -1,11 +1,11 @@
 """
 Query Agent — answers Chip's questions using Email RAG + KPI Sheet.
 
-Two paths:
-  Path 1 (KPI Cache) — queries the Google Sheet for trend / repeating questions.
-  Path 2 (Email RAG)  — semantic search over indexed emails for ad-hoc questions.
+Email RAG (ChromaDB) is the PRIMARY source of truth for all questions.
+The Google Sheet is SUPPLEMENTARY context for KPI/trend questions.
 
-A lightweight router decides which path(s) to use based on the question.
+A lightweight router always includes email RAG, and adds the sheet
+for KPI-keyword or trend-pattern questions.
 
 Usage (standalone):
     python -m outlook_kpi_scraper.query_agent "What is TCSL occupancy this week?"
@@ -172,23 +172,20 @@ _KPI_KEYWORDS = re.compile(
 def _route_question(question: str) -> list[str]:
     """Decide which path(s) to use.
 
-    Returns a list: ["sheet"], ["rag"], or ["sheet", "rag"].
+    Email RAG is ALWAYS included (source of truth).
+    Sheet is added as supplementary context for KPI/trend questions.
+    Returns a list: ["rag"], or ["rag", "sheet"].
     """
     has_trend = bool(_TREND_PATTERNS.search(question))
     has_kpi = bool(_KPI_KEYWORDS.search(question))
-    has_email_cue = any(w in question.lower() for w in [
-        "email", "sent", "forward", "attach", "who sent", "find",
-        "search", "look for", "did anyone", "what did",
-    ])
 
-    paths = []
+    # Email RAG is always the primary path
+    paths = ["rag"]
+
+    # Add sheet as supplementary for KPI/trend queries
     if has_kpi or has_trend:
         paths.append("sheet")
-    if has_email_cue or not has_kpi:
-        paths.append("rag")
-    # Default: both
-    if not paths:
-        paths = ["sheet", "rag"]
+
     return paths
 
 
@@ -203,7 +200,9 @@ You are in KPI-EVIDENCE MODE — numeric data was found in the provided context.
 
 Rules:
 - Be direct and concise.  Chip wants trajectory, risk, and decision leverage — not reports.
-- Always cite your source: [Sheet row X] or [Email from <sender> on <date>].
+- PRIORITISE email context over sheet data.  Emails are the source of truth.
+- If the same metric appears in both emails and the sheet, prefer the email figure and note any discrepancy.
+- Always cite your source: [Email from <sender> on <date>] or [Sheet row X].
 - Present numbers, percentages, and dollar amounts clearly.
 - If the data is incomplete or ambiguous, say so clearly.
 - NEVER fabricate numbers, dates, or facts. Only use data explicitly present in the context below.
@@ -218,6 +217,7 @@ You answer questions about his portfolio companies: Perpetual Title, Triple Crow
 You are in CONTEXT-EVIDENCE MODE — no explicit numeric KPI figures were found in the indexed text, but relevant emails were found.
 
 Rules:
+- PRIORITISE email context over sheet data.  Emails are the source of truth.
 - Summarize the latest discussion threads, actions, risks, and decisions based on the email context provided.
 - Always cite your source: [Email from <sender> on <date>].
 - At the END of your answer, include this exact line on its own paragraph:
@@ -287,19 +287,49 @@ def answer_question(
 
     context_parts = []
     sources = []
-    sheet_has_data = False
     rag_query_used = question
     rag_filters_used: dict = {}
     rag_hit_count = 0
     numeric_evidence_found = False
 
-    # Path 1: KPI Sheet (always try first when routed)
+    # ---- Path 1 (PRIMARY): Email RAG — always runs as source of truth ----
+    rag_query_used = _expand_kpi_query(question)
+    effective_n = max(n_results, 10)  # always fetch at least 10 for KPI queries
+    hits = _search_emails(rag_query_used, api_key, n_results=effective_n)
+    rag_hit_count = len(hits)
+    if hits:
+        email_text = "## Relevant Emails (semantic search — primary source)\n\n"
+        for i, hit in enumerate(hits, 1):
+            meta = hit["metadata"]
+            dist = hit.get("distance", "?")
+            email_text += (
+                f"### Email {i} (relevance: {1 - dist:.2f})\n"
+                if isinstance(dist, (int, float)) else
+                f"### Email {i}\n"
+            )
+            email_text += f"- From: {meta.get('sender', '?')}\n"
+            email_text += f"- Date: {meta.get('date', '?')}\n"
+            email_text += f"- Subject: {meta.get('subject', '?')}\n"
+            email_text += f"- Folder: {meta.get('folder', '?')}\n"
+            if meta.get("attachment_names"):
+                email_text += f"- Attachments: {meta['attachment_names']}\n"
+            doc_snippet = hit['document'][:2000]
+            email_text += f"\n{doc_snippet}\n\n---\n\n"
+            sources.append({
+                "kind": "email",
+                "ref": f"{meta.get('sender', '?')} — {meta.get('subject', '?')} ({meta.get('date', '?')})",
+                "excerpt": doc_snippet[:300],
+            })
+            # Check each email chunk for numeric evidence
+            if not numeric_evidence_found and _has_numeric_evidence(doc_snippet):
+                numeric_evidence_found = True
+        context_parts.append(email_text)
+
+    # ---- Path 2 (SUPPLEMENTARY): KPI Sheet — adds context for KPI/trend Qs ----
     if "sheet" in paths:
         rows = _read_kpi_sheet(env)
         if rows:
-            sheet_has_data = True
-            # Format as concise table context
-            sheet_text = "## KPI Sheet Data (DAILY_KPI_SNAPSHOT)\n\n"
+            sheet_text = "## KPI Sheet Data — supplementary (DAILY_KPI_SNAPSHOT)\n\n"
             sheet_text += "| Row | Date | Entity | Revenue | Cash | Pipeline | Closings | Orders | Occupancy | Notes |\n"
             sheet_text += "|-----|------|--------|---------|------|----------|----------|--------|-----------|-------|\n"
             for i, r in enumerate(rows, 2):
@@ -316,47 +346,8 @@ def answer_question(
                 "ref": f"{len(rows)} rows from DAILY_KPI_SNAPSHOT",
                 "excerpt": f"Sheet contains {len(rows)} rows of KPI data",
             })
-            # Check if sheet itself has numeric evidence
             if _has_numeric_evidence(sheet_text):
                 numeric_evidence_found = True
-
-    # Path 2: Email RAG — use when explicitly routed OR when sheet had no data
-    use_rag = "rag" in paths or ("sheet" in paths and not sheet_has_data)
-    if use_rag:
-        if "rag" not in paths:
-            paths.append("rag")
-        # Expand query for KPI-like terms to improve recall
-        rag_query_used = _expand_kpi_query(question)
-        effective_n = max(n_results, 10)  # always fetch at least 10 for KPI queries
-        hits = _search_emails(rag_query_used, api_key, n_results=effective_n)
-        rag_hit_count = len(hits)
-        if hits:
-            email_text = "## Relevant Emails (semantic search)\n\n"
-            for i, hit in enumerate(hits, 1):
-                meta = hit["metadata"]
-                dist = hit.get("distance", "?")
-                email_text += (
-                    f"### Email {i} (relevance: {1 - dist:.2f})\n"
-                    if isinstance(dist, (int, float)) else
-                    f"### Email {i}\n"
-                )
-                email_text += f"- From: {meta.get('sender', '?')}\n"
-                email_text += f"- Date: {meta.get('date', '?')}\n"
-                email_text += f"- Subject: {meta.get('subject', '?')}\n"
-                email_text += f"- Folder: {meta.get('folder', '?')}\n"
-                if meta.get("attachment_names"):
-                    email_text += f"- Attachments: {meta['attachment_names']}\n"
-                doc_snippet = hit['document'][:2000]
-                email_text += f"\n{doc_snippet}\n\n---\n\n"
-                sources.append({
-                    "kind": "email",
-                    "ref": f"{meta.get('sender', '?')} — {meta.get('subject', '?')} ({meta.get('date', '?')})",
-                    "excerpt": doc_snippet[:300],
-                })
-                # Check each email chunk for numeric evidence
-                if not numeric_evidence_found and _has_numeric_evidence(doc_snippet):
-                    numeric_evidence_found = True
-            context_parts.append(email_text)
 
     # Build rag_debug block
     rag_debug = {

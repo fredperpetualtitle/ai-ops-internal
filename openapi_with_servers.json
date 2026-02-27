@@ -128,6 +128,46 @@
           }
         }
       }
+    },
+    "/admin/upload-emails": {
+      "post": {
+        "tags": ["Admin"],
+        "summary": "Upload Emails",
+        "description": "Bulk upsert email documents into the Railway ChromaDB index. Accepts pre-chunked email text + metadata in batches.",
+        "operationId": "upload_emails_admin_upload_emails_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UploadEmailsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UploadEmailsResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -412,6 +452,59 @@
         "type": "object",
         "required": ["hits", "total_indexed"],
         "title": "SearchResponse"
+      },
+      "UploadEmailDoc": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id",
+            "description": "Stable unique document ID"
+          },
+          "document": {
+            "type": "string",
+            "title": "Document",
+            "description": "Text content of the email chunk"
+          },
+          "metadata": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Metadata",
+            "description": "Email metadata (subject, sender, date, folder, ...)"
+          }
+        },
+        "type": "object",
+        "required": ["id", "document"],
+        "title": "UploadEmailDoc"
+      },
+      "UploadEmailsRequest": {
+        "properties": {
+          "documents": {
+            "items": {
+              "$ref": "#/components/schemas/UploadEmailDoc"
+            },
+            "type": "array",
+            "title": "Documents",
+            "description": "List of documents to upsert"
+          }
+        },
+        "type": "object",
+        "required": ["documents"],
+        "title": "UploadEmailsRequest"
+      },
+      "UploadEmailsResponse": {
+        "properties": {
+          "upserted": {
+            "type": "integer",
+            "title": "Upserted"
+          },
+          "total_in_collection": {
+            "type": "integer",
+            "title": "Total In Collection"
+          }
+        },
+        "type": "object",
+        "required": ["upserted", "total_in_collection"],
+        "title": "UploadEmailsResponse"
       },
       "ValidationError": {
         "properties": {

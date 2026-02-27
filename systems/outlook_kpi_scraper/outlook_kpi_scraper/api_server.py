@@ -167,6 +167,23 @@ class HealthResponse(BaseModel):
     sheet_connected: bool = False
 
 
+class UploadEmailDoc(BaseModel):
+    """A single email document (or chunk) to upsert into ChromaDB."""
+    id: str = Field(..., description="Stable unique document ID")
+    document: str = Field(..., description="Text content of the email chunk")
+    metadata: dict[str, Any] = Field(default_factory=dict, description="Email metadata (subject, sender, date, folder, ...)")
+
+
+class UploadEmailsRequest(BaseModel):
+    """Batch of email documents to upsert into Railway's ChromaDB."""
+    documents: list[UploadEmailDoc] = Field(..., description="List of documents to upsert")
+
+
+class UploadEmailsResponse(BaseModel):
+    upserted: int
+    total_in_collection: int
+
+
 # ---------------------------------------------------------------------------
 # POST /ask — the main conversational endpoint
 # ---------------------------------------------------------------------------
@@ -257,6 +274,47 @@ async def search_emails(req: SearchRequest):
     return SearchResponse(
         hits=formatted_hits,
         total_indexed=total,
+    )
+
+
+# ---------------------------------------------------------------------------
+# POST /admin/upload-emails — bulk upsert email docs into ChromaDB
+# ---------------------------------------------------------------------------
+
+@app.post("/admin/upload-emails", response_model=UploadEmailsResponse, tags=["Admin"])
+async def upload_emails(req: UploadEmailsRequest):
+    """Bulk upsert email documents into the Railway ChromaDB index.
+
+    Accepts pre-chunked email text + metadata.  Intended to be called from a
+    local push script that reads documents from a local ChromaDB and sends
+    them here in batches.
+    """
+    if not api_key:
+        raise HTTPException(status_code=500, detail="OPENAI_API_KEY not set")
+
+    from outlook_kpi_scraper.email_indexer import _get_collection
+
+    _client, collection = _get_collection(api_key)
+
+    ids = [d.id for d in req.documents]
+    docs = [d.document for d in req.documents]
+    metas = [d.metadata for d in req.documents]
+
+    # Upsert in batches of 200 (ChromaDB batch limit)
+    batch_size = 200
+    upserted = 0
+    for i in range(0, len(ids), batch_size):
+        batch_ids = ids[i : i + batch_size]
+        batch_docs = docs[i : i + batch_size]
+        batch_metas = metas[i : i + batch_size]
+        collection.upsert(ids=batch_ids, documents=batch_docs, metadatas=batch_metas)
+        upserted += len(batch_ids)
+
+    log.info("POST /admin/upload-emails — upserted %d docs, total=%d", upserted, collection.count())
+
+    return UploadEmailsResponse(
+        upserted=upserted,
+        total_in_collection=collection.count(),
     )
 
 

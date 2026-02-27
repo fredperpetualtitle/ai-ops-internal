@@ -6,7 +6,7 @@
     "version": "0.1.0"
   },
   "servers": [
-    { "url": "https://molly-unsashed-dennis.ngrok-free.dev" }
+    { "url": "https://ai-ops-internal-production.up.railway.app" }
   ],
   "paths": {
     "/ask": {

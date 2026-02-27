@@ -19,6 +19,7 @@ import logging
 import os
 from datetime import datetime, timedelta, timezone
 
+import pythoncom
 import pywintypes
 import win32com.client
 
@@ -26,7 +27,10 @@ log = logging.getLogger(__name__)
 
 # After this many *consecutive* COM errors in a single folder we assume
 # Outlook is resource-exhausted and move to the next folder.
-MAX_CONSECUTIVE_ERRORS = 50
+MAX_CONSECUTIVE_ERRORS = 30
+
+# Release COM references and run gc every N items to prevent OOM
+GC_EVERY_N_ITEMS = 500
 
 
 # ------------------------------------------------------------------
@@ -99,7 +103,8 @@ def _make_cutoff_tz_safe(cutoff, received_dt):
 # OutlookReader
 # ------------------------------------------------------------------
 class OutlookReader:
-    def __init__(self, mailbox, folder, days, max_items, subfolder_days=None):
+    def __init__(self, mailbox, folder, days, max_items, subfolder_days=None,
+                 date_from=None, date_to=None):
         self.mailbox = mailbox
         if isinstance(folder, list):
             self.folders = folder
@@ -109,8 +114,12 @@ class OutlookReader:
         self.days = days
         self.subfolder_days = subfolder_days
         self.max_items = max_items
-        # Store raw COM items keyed by entry_id for later attachment downloading
-        self._raw_items = {}
+        # Optional date window (datetime objects, inclusive)
+        self.date_from = date_from
+        self.date_to = date_to
+        # Lazy ref to MAPI namespace – set during fetch_messages()
+        # Used by get_raw_item() to re-fetch items on demand via EntryID
+        self._mapi = None
 
     # ---------------------------------------------------------------
     # Folder resolution
@@ -157,6 +166,7 @@ class OutlookReader:
     # ---------------------------------------------------------------
     def fetch_messages(self):
         outlook = win32com.client.Dispatch("Outlook.Application").GetNamespace("MAPI")
+        self._mapi = outlook   # keep for on-demand item re-fetch
         store = None
         target = self.mailbox.strip().lower()
         for s in outlook.Folders:
@@ -190,15 +200,21 @@ class OutlookReader:
             log.info("Scanning folder: '%s' (days=%d)", folder_name, effective_days)
 
             try:
-                folder_msgs = self._fetch_from_folder(store, folder_name,
-                                                      days_override=effective_days)
+                folder_msgs = self._fetch_from_folder(
+                    store, folder_name,
+                    days_override=effective_days,
+                    date_from=self.date_from,
+                    date_to=self.date_to,
+                )
                 all_messages.extend(folder_msgs)
                 log.info("Folder '%s': fetched %d messages", folder_name, len(folder_msgs))
             except Exception as exc:
                 log.error("FOLDER CRASH '%s': %s - skipping folder", folder_name, exc)
 
-            # --- COM memory pressure relief between folders ---
+            # --- Aggressive COM memory relief between folders ---
             gc.collect()
+            log.info("Memory cleanup after folder '%s' (total messages so far: %d)",
+                     folder_name, len(all_messages))
 
         log.info("Total messages from %d folder(s): %d", len(self.folders), len(all_messages))
         return all_messages
@@ -206,7 +222,8 @@ class OutlookReader:
     # ---------------------------------------------------------------
     # Per-folder fetch (index-based iteration + circuit breaker)
     # ---------------------------------------------------------------
-    def _fetch_from_folder(self, store, folder_name, days_override=None):
+    def _fetch_from_folder(self, store, folder_name, days_override=None,
+                           date_from=None, date_to=None):
         """Fetch messages from a single folder using safe index-based iteration."""
         folder = self._resolve_folder(store, folder_name)
         if folder is None:
@@ -214,7 +231,10 @@ class OutlookReader:
 
         is_sent = folder_name.lower() in ("sent items", "sent")
         effective_days = days_override if days_override is not None else self.days
-        cutoff = datetime.now() - timedelta(days=effective_days)
+        if date_from is not None:
+            cutoff = date_from
+        else:
+            cutoff = datetime.now() - timedelta(days=effective_days)
 
         # Sort items (newest first) so we can break on old dates
         sort_field = "SentOn" if is_sent else "ReceivedTime"
@@ -267,7 +287,14 @@ class OutlookReader:
                             consecutive_errors, folder_name, idx, total_count)
                 break
 
+            # --- Periodic memory relief WITHIN the folder ---
+            if idx % GC_EVERY_N_ITEMS == 0:
+                gc.collect()
+                log.info("GC pass at item %d/%d in '%s' (kept=%d, errors=%d)",
+                         idx, total_count, folder_name, kept, skipped_exceptions)
+
             # --- Safe item access ---
+            item = None
             try:
                 item = items.Item(idx)
             except pywintypes.com_error as exc:
@@ -276,6 +303,9 @@ class OutlookReader:
                 if consecutive_errors <= 3:
                     log.debug("COM error accessing item %d in '%s': %s",
                               idx, folder_name, exc)
+                # On OOM specifically, force a heavy GC pass
+                if "Out of memory" in str(exc) or "-2147024882" in str(exc):
+                    gc.collect()
                 continue
             except Exception as exc:
                 skipped_exceptions += 1
@@ -289,7 +319,7 @@ class OutlookReader:
             consecutive_errors = 0  # reset on successful access
 
             try:
-                msg = self._process_item(item, folder_name, is_sent, cutoff)
+                msg = self._process_item(item, folder_name, is_sent, cutoff, date_to)
                 if msg is None:
                     item_class = getattr(item, 'Class', None)
                     if item_class != 43:
@@ -301,9 +331,6 @@ class OutlookReader:
                     break
 
                 messages.append(msg)
-                entry_id = msg.get("entry_id")
-                if entry_id:
-                    self._raw_items[entry_id] = item
                 kept += 1
 
             except TypeError as exc:
@@ -312,12 +339,9 @@ class OutlookReader:
                     received = getattr(item, 'ReceivedTime', None) or getattr(item, 'SentOn', None)
                     cutoff = _make_cutoff_tz_safe(cutoff, received)
                     try:
-                        msg = self._process_item(item, folder_name, is_sent, cutoff)
+                        msg = self._process_item(item, folder_name, is_sent, cutoff, date_to)
                         if msg and msg != "STOP":
                             messages.append(msg)
-                            entry_id = msg.get("entry_id")
-                            if entry_id:
-                                self._raw_items[entry_id] = item
                             kept += 1
                         elif msg == "STOP":
                             break
@@ -352,7 +376,7 @@ class OutlookReader:
                 continue
         return cutoff
 
-    def _process_item(self, item, folder_name, is_sent, cutoff):
+    def _process_item(self, item, folder_name, is_sent, cutoff, date_to=None):
         """Extract message dict from a COM MailItem.
 
         Returns:
@@ -373,7 +397,13 @@ class OutlookReader:
         if received is None:
             return None
 
-        # Ensure timezone-safe comparison
+        # Skip messages newer than the upper bound (if provided)
+        if date_to is not None:
+            date_to_adj = _make_cutoff_tz_safe(date_to, received)
+            if received > date_to_adj:
+                return None
+
+        # Ensure timezone-safe comparison for lower bound
         safe_cutoff = _make_cutoff_tz_safe(cutoff, received)
         if received < safe_cutoff:
             return "STOP"
@@ -432,8 +462,19 @@ class OutlookReader:
         return msg
 
     def get_raw_item(self, entry_id):
-        """Return the raw COM MailItem for an entry_id (for attachment downloading)."""
-        return self._raw_items.get(entry_id)
+        """Re-fetch a COM MailItem on demand via MAPI.GetItemFromID.
+
+        This avoids holding thousands of COM references in memory during
+        the scan.  Only the handful of items that need attachment extraction
+        are re-fetched here.
+        """
+        if not self._mapi or not entry_id:
+            return None
+        try:
+            return self._mapi.GetItemFromID(entry_id)
+        except Exception as exc:
+            log.warning("Could not re-fetch item %s: %s", entry_id[-12:], exc)
+            return None
 
     @staticmethod
     def _get_attachment_meta(item):

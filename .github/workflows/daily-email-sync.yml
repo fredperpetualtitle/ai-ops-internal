@@ -1,0 +1,40 @@
+name: Daily Email Sync to Railway
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests
+
+      - name: Sync new emails to Railway
+        env:
+          OPERATING_API_KEY: ${{ secrets.OPERATING_API_KEY }}
+          OUTLOOK_TENANT_ID: ${{ secrets.OUTLOOK_TENANT_ID }}
+          OUTLOOK_CLIENT_ID: ${{ secrets.OUTLOOK_CLIENT_ID }}
+          OUTLOOK_CLIENT_SECRET: ${{ secrets.OUTLOOK_CLIENT_SECRET }}
+          OUTLOOK_USER_ID: ${{ secrets.OUTLOOK_USER_ID }}
+          OUTLOOK_FOLDER: ${{ vars.OUTLOOK_FOLDER }}
+          RAILWAY_URL: ${{ vars.RAILWAY_URL }}
+        run: |
+          python scripts/daily_email_sync.py
+
+      - name: Log sync result
+        if: always()
+        run: |
+          echo "Sync completed at $(date)"

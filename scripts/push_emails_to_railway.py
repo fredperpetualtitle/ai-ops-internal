@@ -47,7 +47,11 @@ CHROMA_LOCAL_DIR = os.environ.get(
     os.path.join(REPO_ROOT, "systems", "outlook_kpi_scraper", "data", "chromadb"),
 )
 COLLECTION_NAME = "chip_emails"
-BATCH_SIZE = 50  # docs per HTTP request (keep payloads reasonable)
+BATCH_SIZE = int(os.environ.get("PUSH_BATCH_SIZE", "50"))  # docs per HTTP request
+REQUEST_TIMEOUT = int(os.environ.get("PUSH_TIMEOUT_SECONDS", "120"))
+MAX_RETRIES = int(os.environ.get("PUSH_MAX_RETRIES", "3"))
+RETRY_DELAY = float(os.environ.get("PUSH_RETRY_DELAY", "2"))
+START_INDEX = int(os.environ.get("PUSH_START_INDEX", "0"))
 
 
 def main():
@@ -122,7 +126,16 @@ def main():
     errors = 0
     t0 = time.time()
 
-    for i in range(0, len(all_ids), BATCH_SIZE):
+    if START_INDEX < 0:
+        print("WARN: PUSH_START_INDEX < 0, resetting to 0")
+        start = 0
+    else:
+        start = START_INDEX
+
+    if start:
+        print(f"Resuming at index {start:,} (of {len(all_ids):,})")
+
+    for i in range(start, len(all_ids), BATCH_SIZE):
         batch_ids = all_ids[i : i + BATCH_SIZE]
         batch_docs = all_docs[i : i + BATCH_SIZE]
         batch_metas = all_metas[i : i + BATCH_SIZE]
@@ -134,27 +147,42 @@ def main():
             ]
         }
 
-        try:
-            resp = requests.post(endpoint, headers=headers, json=payload, timeout=120)
-            if resp.status_code == 200:
-                data = resp.json()
-                pushed += data.get("upserted", len(batch_ids))
-                elapsed = time.time() - t0
-                rate = pushed / elapsed if elapsed > 0 else 0
-                print(
-                    f"  pushed {pushed:,} / {len(all_ids):,}  "
-                    f"({rate:.0f} docs/s)  "
-                    f"railway total={data.get('total_in_collection', '?')}"
+        for attempt in range(1, MAX_RETRIES + 1):
+            try:
+                resp = requests.post(
+                    endpoint,
+                    headers=headers,
+                    json=payload,
+                    timeout=REQUEST_TIMEOUT,
                 )
-            else:
+                if resp.status_code == 200:
+                    data = resp.json()
+                    pushed += data.get("upserted", len(batch_ids))
+                    elapsed = time.time() - t0
+                    rate = pushed / elapsed if elapsed > 0 else 0
+                    print(
+                        f"  pushed {pushed:,} / {len(all_ids):,}  "
+                        f"({rate:.0f} docs/s)  "
+                        f"railway total={data.get('total_in_collection', '?')}"
+                    )
+                    break
+
                 errors += 1
-                print(f"  ERROR batch {i//BATCH_SIZE}: HTTP {resp.status_code} — {resp.text[:200]}")
+                print(
+                    f"  ERROR batch {i//BATCH_SIZE}: HTTP {resp.status_code} — {resp.text[:200]}"
+                )
                 if resp.status_code == 401:
                     print("  Check your OPERATING_API_KEY.")
                     sys.exit(1)
-        except requests.RequestException as exc:
-            errors += 1
-            print(f"  ERROR batch {i//BATCH_SIZE}: {exc}")
+
+            except requests.RequestException as exc:
+                errors += 1
+                print(f"  ERROR batch {i//BATCH_SIZE} (attempt {attempt}): {exc}")
+
+            if attempt < MAX_RETRIES:
+                time.sleep(RETRY_DELAY * attempt)
+            else:
+                print("  Giving up on this batch; continue to next.")
 
         # Small delay to avoid overwhelming the server
         time.sleep(0.2)

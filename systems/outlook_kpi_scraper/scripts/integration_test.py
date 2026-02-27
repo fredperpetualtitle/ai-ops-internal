@@ -116,14 +116,15 @@ def phase1_scan():
         "--debug",
     ]
     t0 = time.time()
+    # Stream output live to console (no more silent buffering)
     proc = subprocess.run(
-        cmd, cwd=str(PROJECT), capture_output=True,
+        cmd, cwd=str(PROJECT),
         text=True, encoding="utf-8", errors="replace",
     )
     elapsed = time.time() - t0
 
-    stdout = proc.stdout or ""
-    stderr = proc.stderr or ""
+    stdout = ""   # output already streamed to console
+    stderr = ""
 
     print(f"\n  Scan completed in {elapsed:.0f}s  (exit code {proc.returncode})")
     if proc.returncode != 0:

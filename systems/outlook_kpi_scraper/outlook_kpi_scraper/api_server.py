@@ -9,6 +9,7 @@ FastAPI server — Custom GPT Actions backend for Chip's AI Operating Partner.
 
 Endpoints:
     POST /ask            — Route a natural-language question to Sheet + Email RAG
+    POST /ask/route      — Return intent routing metadata for a question
     GET  /kpis           — Return all rows from the DAILY_KPI_SNAPSHOT sheet
     POST /search-emails  — Raw semantic search over indexed emails
     GET  /health         — Health check / index stats
@@ -112,15 +113,39 @@ class AskRequest(BaseModel):
     question: str = Field(..., description="Natural language question from Chip")
     model: str = Field("gpt-4o", description="LLM model for synthesis")
     n_results: int = Field(10, ge=1, le=50, description="Max email hits for RAG path")
+    mode: str = Field("answer", description="answer|route")
+    allow_fallback: bool = Field(True, description="Allow LLM fallback when no sources match")
 
 
 class AskResponse(BaseModel):
-    answer: str
-    sources: list[dict[str, Any]]
-    paths_used: list[str]
-    cost_estimate_usd: float
+    mode: str
+    answer: str | None = None
+    sources: list[dict[str, Any]] | None = None
+    paths_used: list[str] | None = None
+    cost_estimate_usd: float | None = None
     tokens: dict[str, int] | None = None
     rag_debug: dict[str, Any] | None = None
+    route: dict[str, Any] | None = None
+
+
+class RouteRequest(BaseModel):
+    question: str = Field(..., description="Natural language question to classify")
+    n_results: int = Field(5, ge=1, le=20, description="Max preview email hits for routing")
+    include_rag_preview: bool = Field(False, description="Include a small email preview hit list")
+
+
+class RouteResponse(BaseModel):
+    intent: str
+    entity: str
+    time_window: str
+    sources: list[str]
+    route: str
+    sources_used: list[str]
+    confidence: float
+    why_this_route: str
+    rag_query_used: str | None = None
+    rag_preview_count: int | None = None
+    rag_preview: list[dict[str, Any]] | None = None
 
 
 class SearchRequest(BaseModel):
@@ -185,20 +210,117 @@ class UploadEmailsResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Routing helpers
+# ---------------------------------------------------------------------------
+
+def _route_question(question: str) -> dict[str, Any]:
+    text = question.lower()
+
+    intent = "other"
+    reason = "no keyword match"
+
+    if any(k in text for k in ["brief", "executive brief", "morning brief", "daily brief", "weekly brief"]):
+        intent = "generate_brief"
+        reason = "brief keyword"
+    elif any(k in text for k in ["risk", "red flag", "issue", "problem", "deal", "closing", "close"]):
+        intent = "deal_risk"
+        reason = "risk or deal keyword"
+    elif any(k in text for k in ["who owes", "overdue", "blocked", "accountability", "follow up", "follow-up"]):
+        intent = "accountability"
+        reason = "accountability keyword"
+    elif any(k in text for k in ["kpi", "trend", "run rate", "run-rate", "mtd", "pipeline", "cash", "ar", "ap", "occupancy", "move-in", "move-out", "revenue"]):
+        intent = "kpi_query"
+        reason = "kpi keyword"
+    elif any(k in text for k in ["what did we decide", "decision", "decided", "agreed", "action items", "next steps"]):
+        intent = "decision_memory"
+        reason = "decision keyword"
+
+    entity_hits = []
+    if "tcsl" in text:
+        entity_hits.append("TCSL")
+    if "perpetual" in text:
+        entity_hits.append("Perpetual")
+    if "llv" in text:
+        entity_hits.append("LLV")
+
+    if len(entity_hits) == 0:
+        entity = "Mixed"
+    elif len(entity_hits) == 1:
+        entity = entity_hits[0]
+    else:
+        entity = "Mixed"
+
+    if any(k in text for k in ["last 7", "past 7", "last week", "this week", "weekly"]):
+        time_window = "7d"
+    elif any(k in text for k in ["last 30", "past 30", "last month", "this month", "monthly"]):
+        time_window = "30d"
+    elif any(k in text for k in ["90", "quarter", "last quarter", "past quarter"]):
+        time_window = "90d"
+    elif any(k in text for k in ["all time", "overall", "all history"]):
+        time_window = "all"
+    else:
+        time_window = "30d"
+
+    sources = set()
+    if any(k in text for k in ["transcript", "read.ai", "meeting"]):
+        sources.add("read_ai")
+    if any(k in text for k in ["attachment", "pdf", "ppt", "powerpoint", "excel", "spreadsheet"]):
+        sources.add("attachments")
+    if any(k in text for k in ["sheet", "sheets", "kpi", "spreadsheet"]):
+        sources.add("sheets")
+    sources.add("email")
+
+    route_map = {
+        "kpi_query": "chromadb",
+        "decision_memory": "chromadb_decisions",
+        "deal_risk": "agent_2",
+        "accountability": "agent_3",
+        "generate_brief": "agent_1",
+        "other": "llm_direct",
+    }
+    route = route_map[intent]
+
+    confidence = 0.6 if intent != "other" else 0.3
+    why = f"intent={intent} ({reason}); entity={entity}; window={time_window}"
+
+    return {
+        "intent": intent,
+        "entity": entity,
+        "time_window": time_window,
+        "sources": sorted(sources),
+        "route": route,
+        "sources_used": sorted(sources),
+        "confidence": confidence,
+        "why_this_route": why,
+    }
+
+
+# ---------------------------------------------------------------------------
 # POST /ask — the main conversational endpoint
 # ---------------------------------------------------------------------------
 
 @app.post("/ask", response_model=AskResponse, tags=["Q&A"])
 async def ask(req: AskRequest):
-    """Answer a natural-language question using KPI Sheet + Email RAG."""
+    """Answer or route a natural-language question using KPI Sheet + Email RAG."""
+    if req.mode == "route":
+        routed = _route_question(req.question)
+        return AskResponse(mode="route", route=routed)
+
     from outlook_kpi_scraper.query_agent import answer_question
 
     t0 = time.time()
-    result = answer_question(req.question, env=env, n_results=req.n_results, model=req.model)
+    result = answer_question(
+        req.question,
+        env=env,
+        n_results=req.n_results,
+        model=req.model,
+        allow_fallback=req.allow_fallback,
+    )
     elapsed = time.time() - t0
     log.info("POST /ask — %.1fs — paths=%s cost=$%.4f", elapsed, result["paths_used"], result.get("cost_estimate_usd", 0))
 
     return AskResponse(
+        mode="answer",
         answer=result["answer"],
         sources=result["sources"],
         paths_used=result["paths_used"],
@@ -206,6 +328,44 @@ async def ask(req: AskRequest):
         tokens=result.get("tokens"),
         rag_debug=result.get("rag_debug"),
     )
+
+
+# ---------------------------------------------------------------------------
+# POST /ask/route — routing contract endpoint
+# ---------------------------------------------------------------------------
+
+@app.post("/ask/route", response_model=RouteResponse, tags=["Router"])
+async def ask_route(req: RouteRequest):
+    """Return routing metadata for a natural-language question."""
+    routed = _route_question(req.question)
+
+    if req.include_rag_preview:
+        if not api_key:
+            raise HTTPException(status_code=500, detail="OPENAI_API_KEY not set")
+
+        from outlook_kpi_scraper import query_agent
+
+        rag_query_used = query_agent._expand_kpi_query(req.question)
+        hits = query_agent._search_emails(rag_query_used, api_key, n_results=req.n_results)
+        preview = []
+        for h in hits:
+            meta = h.get("metadata", {})
+            preview.append({
+                "id": meta.get("entry_id", ""),
+                "subject": meta.get("subject", ""),
+                "sender": meta.get("sender", ""),
+                "date": meta.get("date", ""),
+                "folder": meta.get("folder", ""),
+                "snippet": h.get("document", "")[:500],
+                "distance": h.get("distance"),
+                "metadata": meta,
+            })
+
+        routed["rag_query_used"] = rag_query_used
+        routed["rag_preview_count"] = len(preview)
+        routed["rag_preview"] = preview
+
+    return RouteResponse(**routed)
 
 
 # ---------------------------------------------------------------------------

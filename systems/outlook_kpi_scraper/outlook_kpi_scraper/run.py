@@ -19,6 +19,7 @@ import logging
 import os
 import time
 import traceback
+from datetime import datetime, time as dtime
 
 from outlook_kpi_scraper.config import (
     load_all_keywords,
@@ -373,6 +374,10 @@ def main():
         description="Scrape Outlook KPI emails and append to Google Sheet."
     )
     parser.add_argument("--days", type=int, default=7, help="Days to look back")
+    parser.add_argument("--date-from", type=str, default=None,
+                        help="Start date (YYYY-MM-DD). Overrides --days lower bound.")
+    parser.add_argument("--date-to", type=str, default=None,
+                        help="End date (YYYY-MM-DD), inclusive.")
     parser.add_argument("--mailbox", type=str, required=True, help="Mailbox display name")
     parser.add_argument("--folder", type=str, default="Inbox", help="Folder name (single)")
     parser.add_argument("--folders", type=str, default=None,
@@ -398,6 +403,24 @@ def main():
         _debug_attachment(args.debug_attachment)
         return
 
+    # ---- Optional date window (inclusive) ----
+    date_from = None
+    date_to = None
+    if args.date_from:
+        try:
+            df = datetime.strptime(args.date_from, "%Y-%m-%d").date()
+            date_from = datetime.combine(df, dtime.min)
+        except ValueError:
+            parser.error("--date-from must be YYYY-MM-DD")
+    if args.date_to:
+        try:
+            dt = datetime.strptime(args.date_to, "%Y-%m-%d").date()
+            date_to = datetime.combine(dt, dtime.max)
+        except ValueError:
+            parser.error("--date-to must be YYYY-MM-DD")
+    if date_from and date_to and date_from > date_to:
+        parser.error("--date-from must be <= --date-to")
+
     debug = args.debug or os.environ.get("DEBUG", "0") in ("1", "true", "True")
     t0 = time.time()
 
@@ -413,6 +436,10 @@ def main():
     log.info("=== Outlook KPI Scraper – run %s ===", run_logger.run_id)
     log.info("Args: days=%d mailbox=%s folders=%s max=%d debug=%s require_kpi=%s",
              args.days, args.mailbox, folder_list, args.max, debug, args.require_kpi)
+    if date_from or date_to:
+        log.info("Date window: from=%s to=%s",
+                 date_from.isoformat() if date_from else "(none)",
+                 date_to.isoformat() if date_to else "(none)")
 
     # ---- Startup validation (config + dependencies) ----
     validate_startup_config()
@@ -436,6 +463,7 @@ def main():
         mailbox=args.mailbox, folder=folder_list,
         days=args.days, max_items=args.max,
         subfolder_days=args.subfolder_days,
+        date_from=date_from, date_to=date_to,
     )
     try:
         messages = reader.fetch_messages()
@@ -800,6 +828,8 @@ def main():
         duration_sec=duration,
         args={
             "days": args.days,
+            "date_from": date_from.isoformat() if date_from else None,
+            "date_to": date_to.isoformat() if date_to else None,
             "mailbox": args.mailbox,
             "folders": folder_list,
             "max": args.max,

@@ -257,6 +257,7 @@ def answer_question(
     *,
     n_results: int = 10,
     model: str = "gpt-4o",
+    allow_fallback: bool = False,
 ) -> dict[str, Any]:
     """Answer a question using the hybrid KPI Sheet + Email RAG approach.
 
@@ -358,12 +359,53 @@ def answer_question(
     }
 
     if not context_parts:
+        if not allow_fallback:
+            return {
+                "answer": "No evidence found in available data for this question. "
+                          "The email index may need to be built, or the KPI sheet may not contain relevant data.",
+                "sources": [],
+                "paths_used": paths,
+                "cost_estimate_usd": 0.0,
+                "rag_debug": rag_debug,
+            }
+
+        fallback_system = (
+            "You are Chip Ridge's AI Operating Intelligence Partner. "
+            "No internal sources were found for this question. "
+            "Provide a concise, executive-level response with general guidance only. "
+            "Do NOT invent facts, numbers, names, or dates. "
+            "Be explicit that this is a general answer without internal sources."
+        )
+        fallback_user = (
+            f"Question: {question}\n\n"
+            "Provide a short executive response. Include a final line: "
+            "'Note: No internal sources matched this request.'"
+        )
+
+        client = OpenAI(api_key=api_key)
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": fallback_system},
+                {"role": "user", "content": fallback_user},
+            ],
+            temperature=0.2,
+            max_tokens=600,
+        )
+
+        answer = response.choices[0].message.content
+        usage = response.usage
+        cost = (usage.prompt_tokens * 5 + usage.completion_tokens * 15) / 1_000_000
+
         return {
-            "answer": "No evidence found in available data for this question. "
-                      "The email index may need to be built, or the KPI sheet may not contain relevant data.",
+            "answer": answer,
             "sources": [],
             "paths_used": paths,
-            "cost_estimate_usd": 0.0,
+            "cost_estimate_usd": round(cost, 4),
+            "tokens": {
+                "prompt": usage.prompt_tokens,
+                "completion": usage.completion_tokens,
+            },
             "rag_debug": rag_debug,
         }
 

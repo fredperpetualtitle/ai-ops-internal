@@ -1,11 +1,9 @@
 # ---------------------------------------------------------------------------
 # requirements.txt — Railway / Cloud API deployment
 # ---------------------------------------------------------------------------
-# This file is what Railway installs.  It contains ONLY the dependencies
-# needed to run the FastAPI API server on Linux.
-#
-# For full local dev (agent runner + pandas):  pip install -r requirements.local.txt
-# For Windows scraper deps:                    pip install -r requirements.scraper-windows.txt
+# This file contains ONLY the dependencies needed to run the FastAPI API
+# server on Linux (Railway).  Windows-only and heavy data-science packages
+# are split out into requirements.local.txt / requirements.scraper-windows.txt.
 # ---------------------------------------------------------------------------
 
 # --- Core API framework ---
@@ -23,8 +21,7 @@ chromadb>=0.4.0
 gspread>=6.0.0
 google-auth
 
-# --- General utilities ---
+# --- General ---
 python-dotenv>=1.0.0
 requests>=2.28.0
 httpx>=0.24.0
-pyyaml

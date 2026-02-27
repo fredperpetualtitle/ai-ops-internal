@@ -131,6 +131,9 @@ def filter_candidates(
     """
     subject = (msg.get("subject") or "").lower()
     body = (msg.get("body") or "").lower()[:3000]
+    source_folder = (msg.get("source_folder") or "").lower()
+    is_sent = source_folder in ("sent items", "sent")
+    is_junk = source_folder in ("junk email", "junk")
 
     # Normalise sender
     parsed = normalise_sender(msg.get("sender_email"), msg.get("sender_name"))
@@ -150,9 +153,10 @@ def filter_candidates(
     people_kws = _load_people_keywords()
 
     # ------------------------------------------------------------------
-    # Hard exclusions (deny domain)
+    # Hard exclusions (deny domain) — skip for Sent/Junk (we sent it or
+    # the spam filter may have been wrong)
     # ------------------------------------------------------------------
-    if sender_domain and sender_domain in deny_domains:
+    if not is_sent and not is_junk and sender_domain and sender_domain in deny_domains:
         msg["candidate_score"] = -5
         msg["candidate_reason"] = ["deny_domain"]
         _debug_log(msg, sender_email, sender_domain, -5, ["deny_domain"], False, debug)
@@ -164,15 +168,28 @@ def filter_candidates(
     score = 0
     reasons = []
 
-    # Trusted sender
-    if sender_email in trusted_senders:
-        score += 3
-        reasons.append("allow_sender")
+    # For Sent Items: Chip is the sender, so sender-trust doesn't apply.
+    # Instead, give a baseline boost if the email has attachments (Chip
+    # forwarding data) and rely on content signals.
+    if is_sent:
+        score += 1             # small baseline — Chip authored it
+        reasons.append("sent_folder")
+    else:
+        # Trusted sender
+        if sender_email in trusted_senders:
+            score += 3
+            reasons.append("allow_sender")
 
-    # Trusted domain
-    if sender_domain and sender_domain in trusted_domains:
-        score += 2
-        reasons.append("allow_domain")
+        # Trusted domain
+        if sender_domain and sender_domain in trusted_domains:
+            score += 2
+            reasons.append("allow_domain")
+
+    # Junk Email: items rescued from spam — give them a small bonus so
+    # content / attachment signals can push them over threshold
+    if is_junk:
+        score += 1
+        reasons.append("junk_folder_rescue")
 
     # Subject regex hit
     subject_hit = any(re.search(pat, subject) for pat in subject_patterns)

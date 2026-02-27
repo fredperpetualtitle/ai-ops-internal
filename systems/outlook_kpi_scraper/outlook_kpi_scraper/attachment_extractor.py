@@ -222,7 +222,6 @@ def extract_kpis_from_attachments(
         fpath = item["path"]
         try:
             if ext == ".csv":
-                # CSV: quick suitability check on first 5KB
                 sample_text = _read_text_sample(fpath, max_bytes=5000)
                 suit = compute_suitability(sample_text, filename=fname)
                 if suit["tier"] == 4:
@@ -267,16 +266,13 @@ def extract_kpis_from_attachments(
 
         except Exception as exc:
             log.warning("Error parsing %s: %s", fname, exc)
+            evidence.append(f"PARSE_FAILED {fname}: {exc}")
             _log_attachment_decision(
                 "PARSE_FAILED", fpath, fname,
                 size=item.get("size", 0), error=str(exc),
             )
 
-    # ------------------------------------------------------------------
     # LLM enhancement layer (post-regex)
-    # ------------------------------------------------------------------
-    # Determine the best (lowest) suitability tier seen across attachments
-    # by parsing the evidence strings already recorded during parsing.
     best_tier = 4
     for ev in evidence:
         m = re.search(r"suitability .+? tier=(\d+)", ev)
@@ -293,10 +289,8 @@ def extract_kpis_from_attachments(
                  best_tier, kpi_count)
         llm_text, doc_type, rep_fname = _collect_text_for_llm(saved_files)
         if llm_text.strip():
-            # Log regex results before LLM merge for audit trail
             regex_snapshot = {f: kpi.get(f) for f in KPI_SYNONYMS}
             evidence.append(f"LLM:pre-merge regex_kpis={regex_snapshot}")
-
             llm_result = extract_kpis_with_llm(
                 text=llm_text,
                 doc_type=doc_type,
@@ -322,9 +316,11 @@ def extract_kpis_from_attachments(
                   best_tier, kpi_count)
 
     if not _has_kpi_value(kpi):
+        evidence.append("NO_KPI_VALUE: Extraction yielded no KPI values.")
         return None
 
-    kpi["evidence"] = evidence
+    # Deduplication: remove duplicate evidence
+    kpi["evidence"] = sorted(set(evidence))
     kpi["attachment_names"] = ";".join(f["name"] for f in saved_files)
     return kpi
 
@@ -962,10 +958,15 @@ def _parse_value(raw: str, field: str):
     raw = raw.strip()
     if field == "occupancy":
         if "%" in raw:
-            return parse_percent(raw)
-        v = parse_money(raw)
-        if v is not None and 0 < v <= 100:
-            return v / 100.0
+            v = parse_percent(raw)
+        else:
+            v = parse_money(raw)
+            if v is not None and 0 < v <= 100:
+                v = v / 100.0
+        # Reject occupancy outside valid range (0.0 – 1.0)
+        if v is not None and (v < 0 or v > 1.0):
+            log.debug("Rejecting occupancy=%s (outside 0–1.0 range)", v)
+            return None
         return v
     if "count" in field:
         v = parse_money(raw)

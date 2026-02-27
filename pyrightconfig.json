@@ -1,0 +1,25 @@
+{
+  "include": [
+    "ai_ops",
+    "src",
+    "scripts",
+    "systems/outlook_kpi_scraper/outlook_kpi_scraper",
+    "systems/outlook_kpi_scraper/scripts",
+    "tests",
+    "app.py"
+  ],
+  "exclude": [
+    "venv",
+    "**/.venv",
+    "**/node_modules",
+    "**/__pycache__",
+    "data"
+  ],
+  "extraPaths": [
+    "systems/outlook_kpi_scraper"
+  ],
+  "venvPath": "systems/outlook_kpi_scraper",
+  "venv": ".venv",
+  "reportMissingImports": true,
+  "reportMissingTypeStubs": false
+}

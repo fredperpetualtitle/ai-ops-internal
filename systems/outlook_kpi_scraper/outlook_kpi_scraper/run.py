@@ -31,6 +31,9 @@ from outlook_kpi_scraper.filters import filter_candidates
 from outlook_kpi_scraper.entity_router import route_entity
 from outlook_kpi_scraper.kpi_extractor import extract_kpis, has_kpi_values, compute_confidence
 from outlook_kpi_scraper.attachment_extractor import extract_kpis_from_attachments, get_attachment_decisions
+from outlook_kpi_scraper.llm_extractor import (
+    llm_available, extract_kpis_with_llm, merge_llm_into_regex,
+)
 from outlook_kpi_scraper.dep_check import check_ocr_dependencies
 from outlook_kpi_scraper.ledger import Ledger
 from outlook_kpi_scraper.run_logger import RunLogger
@@ -41,8 +44,64 @@ from outlook_kpi_scraper.writers.google_sheets_writer import GoogleSheetsWriter
 from outlook_kpi_scraper.writers.csv_writer import CSVWriter
 from outlook_kpi_scraper.utils import load_env
 from outlook_kpi_scraper.quarantine_triage import triage_quarantined_emails, triage_available
+from outlook_kpi_scraper.attachment_gate import evaluate_attachment_gate
 
 log = logging.getLogger(__name__)
+
+# ------------------------------------------------------------------
+# Body-text financial signal detector
+# ------------------------------------------------------------------
+
+# Regex patterns that indicate the body contains actual financial data
+# worth sending to the LLM. At least _BODY_SIGNAL_THRESHOLD hits required.
+import re as _re
+
+_DOLLAR_RE = _re.compile(r"\$[\d,]+(?:\.\d{2})?")           # $1,234.56
+_PERCENT_RE = _re.compile(r"\d+\.?\d*\s*%")                 # 92.3%
+_KPI_KEYWORD_RE = _re.compile(
+    r"\b(?:revenue|cash\s*balance|bank\s*balance|pipeline|"
+    r"closings?|occupancy|census|net\s*income|operating\s*income|"
+    r"total\s*revenue|gross\s*revenue|net\s*revenue|"
+    r"ending\s*balance|current\s*balance|"
+    r"ebitda|noi|cap\s*rate|"
+    r"total\s*expenses|total\s*income|"
+    r"rent\s*roll|monthly\s*report|financial\s*summary)\b",
+    _re.IGNORECASE,
+)
+_BODY_SIGNAL_THRESHOLD = 2  # need at least 2 distinct signal types
+
+# Subject patterns that indicate deal discussion / legal negotiation
+# rather than operating KPI reports.  Body-text LLM is skipped for these.
+_DEAL_DISCUSSION_RE = _re.compile(
+    r"\b(?:PSA|purchase\s+(?:and\s+)?sale|term\s*sheets?|data\s*room|"
+    r"due\s*diligence|LOI|letter\s+of\s+intent|earnest\s+money|"
+    r"closing\s+(?:documents?|instructions?)|escrow|"
+    r"diligence\s+items?|title\s+(?:update|commitment|policy|search)|"
+    r"wire\s+(?:instructions?|approval))\b",
+    _re.IGNORECASE,
+)
+
+
+def _body_has_kpi_signals(body: str) -> bool:
+    """Fast heuristic: does *body* contain enough financial signals
+    to justify an LLM call?  Returns True if ≥ 2 signal types found
+    among {dollar amounts, percentages, KPI keywords}."""
+    signals = 0
+    if _DOLLAR_RE.search(body):
+        signals += 1
+    if _PERCENT_RE.search(body):
+        signals += 1
+    if _KPI_KEYWORD_RE.search(body):
+        signals += 1
+    return signals >= _BODY_SIGNAL_THRESHOLD
+
+
+def _is_deal_discussion(msg: dict) -> bool:
+    """Return True if the email subject indicates deal discussion,
+    legal negotiation, or transactional activity rather than an
+    operating KPI report."""
+    subject = (msg.get("subject") or "")
+    return bool(_DEAL_DISCUSSION_RE.search(subject))
 
 
 # ------------------------------------------------------------------
@@ -315,8 +374,14 @@ def main():
     )
     parser.add_argument("--days", type=int, default=7, help="Days to look back")
     parser.add_argument("--mailbox", type=str, required=True, help="Mailbox display name")
-    parser.add_argument("--folder", type=str, default="Inbox", help="Folder name")
-    parser.add_argument("--max", type=int, default=200, help="Max messages to process")
+    parser.add_argument("--folder", type=str, default="Inbox", help="Folder name (single)")
+    parser.add_argument("--folders", type=str, default=None,
+                        help="Comma-separated folder names (e.g. 'Inbox,Sent Items,Junk Email')")
+    parser.add_argument("--max", type=int, default=200, help="Max messages to process (per folder)")
+    parser.add_argument("--subfolder-days", type=int, default=None,
+                        help="Days to look back for subfolders (e.g. Inbox/PAYROLL). "
+                             "Defaults to --days if not set. Use a longer window "
+                             "(e.g. 365) for infrequently-updated subfolders.")
     parser.add_argument("--debug", action="store_true", help="Enable debug output")
     parser.add_argument("--require-kpi", action="store_true", default=True,
                         help="Only append rows with at least one KPI value (default: True)")
@@ -336,12 +401,18 @@ def main():
     debug = args.debug or os.environ.get("DEBUG", "0") in ("1", "true", "True")
     t0 = time.time()
 
+    # ---- Resolve folder list ----
+    if args.folders:
+        folder_list = [f.strip() for f in args.folders.split(",") if f.strip()]
+    else:
+        folder_list = [args.folder]
+
     # ---- Environment & logging ----
     env = load_env()
     run_logger = RunLogger()   # creates logs/runs/<run_id>/ and sets up file logging
     log.info("=== Outlook KPI Scraper – run %s ===", run_logger.run_id)
-    log.info("Args: days=%d mailbox=%s folder=%s max=%d debug=%s require_kpi=%s",
-             args.days, args.mailbox, args.folder, args.max, debug, args.require_kpi)
+    log.info("Args: days=%d mailbox=%s folders=%s max=%d debug=%s require_kpi=%s",
+             args.days, args.mailbox, folder_list, args.max, debug, args.require_kpi)
 
     # ---- Startup validation (config + dependencies) ----
     validate_startup_config()
@@ -362,8 +433,9 @@ def main():
     # ---- Fetch messages ----
     ledger = Ledger()
     reader = OutlookReader(
-        mailbox=args.mailbox, folder=args.folder,
+        mailbox=args.mailbox, folder=folder_list,
         days=args.days, max_items=args.max,
+        subfolder_days=args.subfolder_days,
     )
     messages = reader.fetch_messages()
     scanned = len(messages)
@@ -407,17 +479,65 @@ def main():
 
     quarantined = []
 
+    # ---- Thread deduplication ----
+    # Group candidates by ConversationTopic so we only extract KPIs
+    # from the MOST RECENT email in each thread (avoids duplicate
+    # rows from quoted reply chains).
+    _seen_conversations: dict[str, str] = {}   # conv_topic → entry_id of newest
+    _thread_dupes: set[str] = set()             # entry_ids to skip
+
+    for msg in candidates:
+        conv_topic = (msg.get("conversation_topic") or "").strip()
+        eid = msg["entry_id"]
+        if conv_topic:
+            if conv_topic in _seen_conversations:
+                # We already have a newer message for this thread
+                _thread_dupes.add(eid)
+            else:
+                _seen_conversations[conv_topic] = eid
+
+    skipped_thread_dedup = len(_thread_dupes)
+    if skipped_thread_dedup:
+        log.info("Thread dedup: %d duplicate thread emails will be skipped",
+                 skipped_thread_dedup)
+
     # ---- Extract KPIs ----
     extracted_rows = []      # list of (entry_id, kpi_row)
     failed_extractions = []
     skipped_no_kpi = 0
     skipped_quarantine = 0
     skipped_kpi_validation = 0
+    skipped_noise = 0        # attachment gate noise rejections
+    skipped_deal_discussion = 0  # deal-discussion subject filter
 
     for msg in candidates:
         entry_id = msg["entry_id"]
         try:
-            # 0) Source mapping — deterministic rule matching
+            # 0-pre) Thread dedup — skip older replies in same conversation
+            if entry_id in _thread_dupes:
+                log.debug("Thread dedup skip: sender=%s subject=%s",
+                          msg.get("sender_email"), msg.get("subject"))
+                continue
+
+            # 0a) Attachment type gate — deterministic pre-filter
+            #     Prevents image-only noise from consuming extraction time
+            att_gate = evaluate_attachment_gate(msg)
+            msg["attachment_gate"] = att_gate["decision"]
+
+            if att_gate["decision"] in ("NOISE_IMAGE_ONLY", "NOISE_SIGNATURE", "NOISE_SUBJECT"):
+                skipped_noise += 1
+                run_logger.add_quarantined(
+                    msg,
+                    reason=f"attachment_gate:{att_gate['decision']} – {att_gate['reason']}",
+                    top_scores=[],
+                )
+                log.info("NOISE SKIP: sender=%s subject=%s gate=%s",
+                         msg.get("sender_email"), msg.get("subject"),
+                         att_gate["decision"])
+                quarantined.append(msg)
+                continue
+
+            # 0b) Source mapping — deterministic rule matching
             src_match = match_email(msg)
 
             if not src_match.matched:
@@ -457,8 +577,58 @@ def main():
                         error=str(exc),
                     )
 
-            # 2) Body-text extraction (fills gaps)
+            # 1b) Body-text LLM extraction — runs when attachments yielded
+            #     no KPIs AND the body text contains financial signals
+            #     (dollar amounts, percentages, or KPI keywords).
+            #     Skipped entirely for deal-discussion subjects (PSA, Term
+            #     Sheet, Data Room, etc.) to prevent third-party acquisition
+            #     figures from being misclassified as operating KPIs.
+            body_llm_kpis = None
+            body_text = (msg.get("body") or "").strip()
+            _att_empty = att_kpis is None or not any(
+                att_kpis.get(f) is not None
+                for f in ("revenue", "cash", "pipeline_value",
+                          "closings_count", "orders_count", "occupancy")
+            )
+
+            _is_deal = _is_deal_discussion(msg)
+            if _is_deal:
+                skipped_deal_discussion += 1
+                log.debug("Deal discussion skip (body LLM): sender=%s subject=%s",
+                          msg.get("sender_email"), msg.get("subject"))
+
+            _body_has_financial_signal = False
+            if _att_empty and not _is_deal and len(body_text) > 80:
+                _body_has_financial_signal = _body_has_kpi_signals(body_text)
+
+            if _att_empty and _body_has_financial_signal and llm_available():
+                try:
+                    body_llm_kpis = extract_kpis_with_llm(
+                        body_text,
+                        doc_type="email_body",
+                        filename=f"body:{msg.get('sender_email', '')} / {msg.get('subject', '')}",
+                    )
+                    if body_llm_kpis:
+                        source_type = "body_llm"
+                        log.info("Body-text LLM KPIs for entry_id=%s: %s",
+                                 entry_id[-12:],
+                                 {f: body_llm_kpis[f].get("value")
+                                  for f in body_llm_kpis
+                                  if body_llm_kpis[f].get("value") is not None})
+                except Exception as exc:
+                    log.warning("Body-text LLM extraction failed for %s: %s",
+                                entry_id[-12:], exc)
+
+            # 2) Body-text regex extraction (fills gaps)
             kpi_row = extract_kpis(msg, entity, attachment_kpis=att_kpis)
+
+            # 2b) Merge body LLM results into kpi_row (overrides regex gaps)
+            if body_llm_kpis:
+                evidence_list = kpi_row.get("evidence_source", "").split("; ")
+                kpi_row = merge_llm_into_regex(
+                    kpi_row, body_llm_kpis, evidence_list, source="body",
+                )
+                kpi_row["evidence_source"] = "; ".join(evidence_list)
 
             # 3) Data integrity gate
             if args.require_kpi and not has_kpi_values(kpi_row):
@@ -560,9 +730,11 @@ def main():
                       msg.get("sender_email"), msg.get("subject"), exc)
 
     log.info("Extracted: %d rows, skipped_no_kpi=%d, quarantined=%d, "
-             "kpi_validation_rejects=%d, extraction_errors=%d",
+             "noise_skipped=%d, kpi_validation_rejects=%d, extraction_errors=%d, "
+             "thread_dedup=%d, deal_discussion_skipped=%d",
              len(extracted_rows), skipped_no_kpi, skipped_quarantine,
-             skipped_kpi_validation, len(failed_extractions))
+             skipped_noise, skipped_kpi_validation, len(failed_extractions),
+             skipped_thread_dedup, skipped_deal_discussion)
 
     # ---- Write LLM candidates manifest ----
     # Captures Tier 1/2 docs (for enrichment) + quarantined emails (for triage)
@@ -619,12 +791,13 @@ def main():
         failed_count=failed_count,
         skipped_no_kpi=skipped_no_kpi,
         quarantined_count=skipped_quarantine,
+        noise_skipped=skipped_noise,
         kpi_validation_rejects=skipped_kpi_validation,
         duration_sec=duration,
         args={
             "days": args.days,
             "mailbox": args.mailbox,
-            "folder": args.folder,
+            "folders": folder_list,
             "max": args.max,
             "debug": debug,
             "require_kpi": args.require_kpi,
@@ -646,7 +819,9 @@ def main():
     print(f"  scanned={scanned}  candidates={len(candidates)}  "
           f"extracted={len(extracted_rows)}  appended={appended}  "
           f"failed={failed_count}  skipped_no_kpi={skipped_no_kpi}  "
+          f"noise_skipped={skipped_noise}  "
           f"quarantined={skipped_quarantine}  kpi_rejects={skipped_kpi_validation}  "
+          f"thread_dedup={skipped_thread_dedup}  deal_skipped={skipped_deal_discussion}  "
           f"duration={duration:.1f}s")
     if triage_summary and triage_summary.get("classified", 0) > 0:
         print(f"\n  TRIAGE: classified={triage_summary['classified']}  "

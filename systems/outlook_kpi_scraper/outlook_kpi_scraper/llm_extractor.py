@@ -43,6 +43,16 @@ RULES:
 6. Return null for any field where NO legitimate value exists.
 7. Provide a brief evidence_line (the exact text snippet) for each value.
 8. Provide a confidence score (0.0-1.0) for each extracted value.
+9. IGNORE aspirational, target, or goal language.  Phrases like
+   "hold 92% occupancy", "achieve $X", "goal of $X", "target NOI",
+   "we aim to", or "budget of $X" describe PLANS, not actuals.
+   Return null for these.
+10. IGNORE deal-discussion figures.  If the text discusses a company
+    being acquired, sold, or evaluated (e.g. "a company with $600k in
+    annual revenue", "purchase price $5M"), those are THIRD-PARTY
+    descriptors, NOT the sender's operating metrics.  Return null.
+11. Only extract values that the sender (or their company) is REPORTING
+    as their own actual, realised operating results.
 
 Respond ONLY with valid JSON – no markdown fences, no commentary.
 """
@@ -318,10 +328,13 @@ def _parse_llm_response(raw: str) -> dict[str, Any] | None:
             except (ValueError, TypeError):
                 val = None
 
-        # Normalise occupancy to 0-1 range
+        # Normalise occupancy to 0-1 range and reject absurd values
         if field == "occupancy" and val is not None:
             if val > 1:
                 val = val / 100.0
+            if val < 0 or val > 1.0:
+                log.debug("Rejecting LLM occupancy=%s (outside 0–1.0 range)", val)
+                val = None
 
         # Integer fields
         if "count" in field and val is not None:

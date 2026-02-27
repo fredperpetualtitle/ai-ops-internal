@@ -585,4 +585,10 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    # When run directly, start the FastAPI API server.
+    # The actual FastAPI app is in app.py (which imports from
+    # systems/outlook_kpi_scraper/outlook_kpi_scraper/api_server.py).
+    # To run the batch agent pipeline instead, call main() directly.
+    import uvicorn
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run("app:app", host="0.0.0.0", port=port)

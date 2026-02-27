@@ -232,6 +232,7 @@ class RunLogger:
                     extracted_count: int, appended_count: int,
                     failed_count: int, skipped_no_kpi: int = 0,
                     quarantined_count: int = 0,
+                    noise_skipped: int = 0,
                     kpi_validation_rejects: int = 0,
                     duration_sec: float = 0, args: dict | None = None):
         self._summary = {
@@ -244,6 +245,7 @@ class RunLogger:
             "failed_count": failed_count,
             "skipped_no_kpi": skipped_no_kpi,
             "quarantined_count": quarantined_count,
+            "noise_skipped": noise_skipped,
             "kpi_validation_rejects": kpi_validation_rejects,
             "duration_sec": round(duration_sec, 2),
             "args": args or {},

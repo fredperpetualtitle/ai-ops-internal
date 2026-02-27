@@ -1,3 +1,10 @@
+# ---------------------------------------------------------------------------
+# requirements.scraper-windows.txt — Windows-only Outlook COM scraper
+# ---------------------------------------------------------------------------
+# Install these ONLY on your local Windows dev machine.
+# These packages will NOT work on Linux / Railway.
+# ---------------------------------------------------------------------------
+
 pywin32
 python-dotenv
 pyyaml

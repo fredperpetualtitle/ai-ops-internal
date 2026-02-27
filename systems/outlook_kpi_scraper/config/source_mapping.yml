@@ -64,7 +64,7 @@ sources:
 
     expected_kpis:
       - kpi_key: cash
-        required: true
+        required: false
         value_type: currency
         source_label:
           - Cash Balance

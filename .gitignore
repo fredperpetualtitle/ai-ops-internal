@@ -1,4 +1,4 @@
-venv/
+﻿venv/
 .venv/
 __pycache__/
 *.pyc
@@ -20,3 +20,9 @@ systems/outlook_kpi_scraper/.env
 # --- Outlook KPI scraper runtime artifacts ---
 systems/outlook_kpi_scraper/logs/
 systems/outlook_kpi_scraper/data/ledger.db
+systems/outlook_kpi_scraper/data/chromadb/
+
+# --- Stale debug files ---
+outlook_reader_f6952b1.py
+outlook_reader_original.py
+*.py.bak

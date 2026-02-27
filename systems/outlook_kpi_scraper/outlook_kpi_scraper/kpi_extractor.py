@@ -94,9 +94,6 @@ def extract_kpis(msg, entity, attachment_kpis=None, suitability_score: int | Non
     body = msg.get('body', '')
     kpi = {'entity': entity}
     evidence_parts = []
-
-    # Invoice guardrail: suppress revenue from body if text looks invoice-like
-    # and suitability score is not high enough
     invoice_like = _is_invoice_like(body)
     safe_suit_score = suitability_score if suitability_score is not None else 0
 
@@ -112,14 +109,11 @@ def extract_kpis(msg, entity, attachment_kpis=None, suitability_score: int | Non
     for field, pat in _PATTERNS.items():
         if field in kpi and kpi[field] is not None:
             continue  # already have from attachment
-
-        # Invoice guardrail: don't extract revenue from invoice-like docs
-        # unless suitability score is high
-        if field == "revenue" and invoice_like and safe_suit_score < 6:
+        # Loosen invoice guardrail: allow revenue extraction if evidence is strong
+        if field == "revenue" and invoice_like and safe_suit_score < 4:
             evidence_parts.append(f"body SKIPPED '{field}' – invoice-like text, score={safe_suit_score}")
             kpi.setdefault(field, None)
             continue
-
         try:
             m = pat.search(body)
             if m:
@@ -140,13 +134,17 @@ def extract_kpis(msg, entity, attachment_kpis=None, suitability_score: int | Non
                         evidence_parts.append(f"body regex '{field}' matched '{val}'")
             else:
                 kpi.setdefault(field, None)
-        except Exception:
+        except Exception as exc:
+            evidence_parts.append(f"body regex error '{field}': {exc}")
             kpi.setdefault(field, None)
 
     kpi['date'] = msg.get('received_dt', '')[:10] if msg.get('received_dt') else None
     kpi['alerts'] = _check_anomalies(kpi)
     kpi['notes'] = attachment_kpis.get('attachment_names', '') if attachment_kpis else ''
     kpi['evidence_source'] = '; '.join(evidence_parts) if evidence_parts else 'body_only'
+
+    # Deduplication: remove duplicate evidence
+    kpi['evidence_source'] = '; '.join(sorted(set(evidence_parts))) if evidence_parts else 'body_only'
     return kpi
 
 
@@ -155,10 +153,9 @@ def _check_anomalies(kpi: dict) -> str:
     alerts = []
     occ = kpi.get('occupancy')
     if occ is not None:
-        if occ < 0:
-            alerts.append(f"ANOMALY: occupancy={occ} is negative")
-        elif occ > 1.2:
-            alerts.append(f"ANOMALY: occupancy={occ} exceeds 120%")
+        if occ < 0 or occ > 1.0:
+            alerts.append(f"ANOMALY: occupancy={occ} outside 0–1.0; nullified")
+            kpi['occupancy'] = None  # hard reject — prevents junk rows
     cash = kpi.get('cash')
     if cash is not None and cash < 0:
         alerts.append(f"ANOMALY: cash={cash} is negative")

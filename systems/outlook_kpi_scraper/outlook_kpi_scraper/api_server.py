@@ -333,11 +333,17 @@ async def health():
 
     try:
         from outlook_kpi_scraper.email_indexer import _get_collection, CHROMA_DIR
+        chroma_path = str(CHROMA_DIR)
         _, coll = _get_collection(api_key)
         email_count = coll.count()
-        chroma_path = str(CHROMA_DIR)
-    except Exception:
-        pass
+    except Exception as exc:
+        log.exception("Health: ChromaDB probe failed: %s", exc)
+        # Still report what we can
+        try:
+            from outlook_kpi_scraper.email_indexer import CHROMA_DIR as _cd
+            chroma_path = f"ERROR({_cd}): {exc}"
+        except Exception:
+            chroma_path = f"ERROR: {exc}"
 
     try:
         from outlook_kpi_scraper.query_agent import _read_kpi_sheet

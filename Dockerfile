@@ -19,6 +19,8 @@ COPY . .
 
 # Railway injects PORT at runtime; default to 8000
 ENV PORT=8000
+# Point ChromaDB at the persistent volume (Railway volume mounted at /data)
+ENV CHROMA_PERSIST_DIR=/data/chroma
 EXPOSE 8000
 
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
